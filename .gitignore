@@ -1,0 +1,12 @@
+.env
+data/
+repo_site/
+shots/
+__pycache__/
+*.log
+*.png
+verify_*.py
+probe_*.py
+backfill_*.py
+chk_*.py
+shot*.py

@@ -1,0 +1,59 @@
+name: 台股資金流量-每日更新
+
+on:
+  schedule:
+    # 14:05 UTC = 台北 22:05,週一~週五(盤後)。GitHub 排程偶有數十分鐘延遲屬正常。
+    - cron: '5 14 * * 1-5'
+  workflow_dispatch: {}   # 允許在 Actions 頁手動按「Run workflow」立即執行
+
+permissions:
+  contents: write         # 供推送 gh-pages(用內建 GITHUB_TOKEN,不需額外設定)
+
+concurrency:
+  group: twflow-daily
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 還原資料庫快取
+        uses: actions/cache/restore@v4
+        with:
+          path: data/funds.db
+          key: twflow-db-${{ github.run_id }}
+          restore-keys: |
+            twflow-db-
+
+      - name: 首次執行時全量回補歷史(無快取才跑)
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          if [ ! -f data/funds.db ]; then
+            echo "::notice::無資料庫快取,首次全量回補(約 30-40 分鐘,僅第一次)"
+            python3 fetch_data.py --backfill
+          else
+            echo "已從快取還原 data/funds.db"
+          fi
+
+      - name: 抓當日盤後 + 重建儀表板 + 部署 GitHub Pages
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 run_daily.py
+
+      - name: 儲存資料庫快取(供下次增量)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/funds.db
+          key: twflow-db-${{ github.run_id }}
