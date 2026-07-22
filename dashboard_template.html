@@ -789,9 +789,10 @@ function renderPoolTide(){
   const txV = tx.filter(v=>v!=null);
   const tx0 = txV.length?txV[0]:null, tx1 = txV.length?txV[txV.length-1]:null;
   const txPct = (tx0 && tx1)?((tx1-tx0)/tx0*100):null;
-  // 左軸(累積水位)與柱(單日)零點對齊:同負值比例;加權指數走自己的右軸(不需對零)
+  // 零點對齊:以「單日柱」的正負比例決定零點高度(藍在上、琥珀在下、跨零),
+  // 不讓全負/全正的累積線把零點推到頂或底;累積線再依此零點縮放填入
   const frac = s=>{ const mn=Math.min(0,...s), mx=Math.max(0,...s); return (mx-mn)? -mn/(mx-mn) : 0; };
-  const f = Math.max(frac(cumAll.concat(cumMain)), frac(yAll), 0.06);
+  const f = Math.min(0.8, Math.max(0.2, frac(yAll)));
   const rng = s=>{ const mn=Math.min(0,...s), mx=Math.max(0,...s);
     const S = Math.max(mx/(1-f)||0, -mn/f||0) * 1.12 || 1; return [-f*S, (1-f)*S]; };
   const rCum = rng(cumAll.concat(cumMain)), rDay = rng(yAll);
