@@ -17,16 +17,16 @@ BRANCH = GH.get("branch") or "gh-pages"
 SITE = os.path.join(BASE, "repo_site")
 
 def _token():
-    # 優先讀環境變數(GitHub Actions 自動提供 GITHUB_TOKEN),再退回本機 .env
-    env = os.environ.get("GITHUB_TOKEN")
-    if env:
-        return env.strip()
+    # 本機 .env 優先(避免被沙盒/代理注入的佔位 GITHUB_TOKEN 蓋掉);CI 無 .env 時退回環境變數
     p = os.path.join(BASE, ".env")
     if os.path.exists(p):
         for line in open(p, encoding="utf-8"):
             if line.startswith("GITHUB_TOKEN="):
-                return line.strip().split("=", 1)[1]
-    raise SystemExit("GITHUB_TOKEN 未設定(環境變數或 .env 皆無)")
+                return line.strip().split("=", 1)[1].strip()
+    env = os.environ.get("GITHUB_TOKEN")
+    if env:
+        return env.strip()
+    raise SystemExit("GITHUB_TOKEN 未設定(.env 或環境變數皆無)")
 
 def git(*args, cwd=SITE, ok_fail=False):
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=600)

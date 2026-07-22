@@ -20,17 +20,17 @@ CONFIG = json.load(open(os.path.join(BASE_DIR, "config.json"), encoding="utf-8")
 TPE = ZoneInfo("Asia/Taipei")
 
 def _load_token():
-    # 優先讀環境變數(GitHub Actions 用 secret 注入),再退回本機 .env
-    env = os.environ.get("FINMIND_TOKEN")
-    if env:
-        return env.strip()
+    # 本機 .env 優先;CI 無 .env 時退回環境變數(GitHub Actions 用 secret 注入)
     p = os.path.join(BASE_DIR, ".env")
     if os.path.exists(p):
         with open(p, encoding="utf-8") as f:
             for line in f:
                 if line.startswith("FINMIND_TOKEN="):
-                    return line.strip().split("=", 1)[1]
-    raise RuntimeError("FINMIND_TOKEN 未設定(環境變數或 .env 皆無)")
+                    return line.strip().split("=", 1)[1].strip()
+    env = os.environ.get("FINMIND_TOKEN")
+    if env:
+        return env.strip()
+    raise RuntimeError("FINMIND_TOKEN 未設定(.env 或環境變數皆無)")
 
 TOKEN = _load_token()
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",

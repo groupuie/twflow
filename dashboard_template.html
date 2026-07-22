@@ -155,7 +155,7 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
       <b>融券放空的現金流採「方向口徑」</b>:融券增加=賣壓(負流)、回補=買壓(正流),金額=Δ融券×收盤估。注意會計上放空當下賣出價金 100%+保證金 90% 皆被凍結在信用帳戶(約 190% 擔保),現金其實「進入」市場保證金體系而非離場——方向與現金位置相反,是「錢多≠看多」的典型;本圖選方向口徑,因為資金輪動回答的是「方向的錢往哪押」。
       <b>⚡</b>=同類別機構與散戶方向相反且較小方 ≥2 億 — 轉折觀察訊號。「Σ 現金池」=−Σ(現貨類別淨流),法人池與散戶池各自為其口徑的鏡像,
       量體天生大一個數量級故放專屬下軌(刻度獨立、零點對齊)。現金(超短債)ETF 視為池內重分配,不入類別列。
-      <b>池水位圖判讀</b>:線=視窗起點歸零的<b>累積</b>水位(左軸,琥珀實線=全體、褐虛線=法人),柱=<b>單日</b>入/出池量——琥珀柱(正)=當日淨賣壓、資金退回現金池;藍柱(負)=當日淨買盤、<b>資金離池進場買貨(含空單回補)</b>;<b>白線=台股加權指數</b>(右軸,隨所選日期區間連動)。提醒:池與指數的高相關主要由台積電等權值股同時驅動(同一筆賣壓的兩種畫法),<b>不是</b>兩路獨立訊號互相驗證,也不是反轉燈號。
+      <b>資金水位圖判讀</b>(座標已翻轉成與指數同向):線=視窗起點歸零的<b>累積進場量</b>(左軸,琥珀實線=全體、褐虛線=法人),柱=<b>單日</b>進出——<b>向上=藍柱=資金進場買股</b>(含空單回補),向下=琥珀柱=賣壓退場(資金回現金池);<b>白線=台股加權指數</b>(右軸,隨所選日期區間連動)。翻轉後兩線<b>同方向</b>:資金進場(水位升)通常伴隨指數走強、賣壓退場(水位降)伴隨指數走弱,不再是鏡像。提醒:兩者高相關主要由台積電等權值股同時驅動(同一筆買賣的兩種畫法),<b>不是</b>兩路獨立訊號互相驗證,也不是反轉燈號;真正的乖離看下方 ▲▼ 脫鉤標記。
       <b>脫鉤偵測(▲▼)</b>:每晚以最近 90 個交易日「指數日漲跌 ~ 池單日流量」做迴歸當固定尺標(斜率即上方『每百億入池≈−X點』;選較早的自訂視窗也用同一把尺),殘差超過 ±2σ(σ 用穩健 MAD,極端日不會自己撐大門檻)才標記——<span style="color:#22c55e">▲=指數遠強於可見資金流</span>=異常吸收/推升,口徑外資金(主力/現股/外資期現套利)在接或在買;<span style="color:#ef4444">▼=遠弱</span>=口徑外賣壓或流動性差。它回答的不是「要不要反轉」,而是「<b>今天的價格,是不是可見的錢推出來的</b>」——價量一致的大跌(如 07-17,殘差僅 −1.5σ)不會觸發,唯有價格與資金流不一致才亮燈。
       <b>誠實原則</b>:池量的是「法人買賣超/信用增減的失衡鏡像」,不是會計意義的資金進出(每筆成交必有對手方);
       觀測範圍=單日淨流 ≥0.5 億之標的,不是全市場。主力/現股散戶不在兩口徑內。</div>
@@ -771,11 +771,13 @@ function renderPoolTide(){
   if(use.length < 2){ use = dates.slice(-10); mode = '近 10 日參考(視窗為單日)'; }
   if(use.length < 2){ el.innerHTML='<div class="miss" style="padding:20px">池水位線累積中(每日盤後自動加點)</div>'; return; }
   const x = use.map(d=>d.slice(5));
+  // 口徑翻轉:向上=出池(資金進場買股,與指數同向)、向下=入池(賣壓退場)
+  // yMain=Σ機構淨買(進場為正);yAll=Σ(機構+散戶)淨買。正=進場買、負=賣壓
   const yMain = use.map(d=>{ let s=0; const day=D[d]||{};
-    Object.keys(day).forEach(k=>{ if(!NOPOOL.has(day[k].c)) s+=(day[k].m||0); }); return -s; });
+    Object.keys(day).forEach(k=>{ if(!NOPOOL.has(day[k].c)) s+=(day[k].m||0); }); return s; });
   const yAll = use.map(d=>{ let s=0; const day=D[d]||{};
-    Object.keys(day).forEach(k=>{ if(!NOPOOL.has(day[k].c)) s+=((day[k].m||0)+(day[k].r||0)); }); return -s; });
-  // 真「水位」=視窗起點歸零的累積量;單日量改畫成柱(琥珀=入池/藍=出池進場)
+    Object.keys(day).forEach(k=>{ if(!NOPOOL.has(day[k].c)) s+=((day[k].m||0)+(day[k].r||0)); }); return s; });
+  // 「水位」=視窗起點歸零的累積進場量;單日量畫成柱(藍=進場買/琥珀=賣壓退)
   const cumAll = [], cumMain = [];
   yAll.reduce((a,v)=>{ const s=a+v; cumAll.push(s); return s; }, 0);
   yMain.reduce((a,v)=>{ const s=a+v; cumMain.push(s); return s; }, 0);
@@ -797,15 +799,15 @@ function renderPoolTide(){
   const rTx = txV.length?[Math.min(...txV)-txPad, Math.max(...txV)+txPad]:[0,1];
   const traces = [
     {type:'bar', name:'單日', x, y:yAll, yaxis:'y3',
-     marker:{color:yAll.map(v=>v>=0?'rgba(245,158,11,.38)':'rgba(56,189,248,.5)')},
-     hovertemplate:'%{x} 單日 %{y:.1f} 億(正=入池/負=出池進場)<extra></extra>'},
-    {type:'scatter', mode:'lines+markers', name:'全體水位(累積)', x, y:cumAll,
+     marker:{color:yAll.map(v=>v>=0?'rgba(56,189,248,.5)':'rgba(245,158,11,.42)')},
+     hovertemplate:'%{x} 單日 %{y:.1f} 億(正=進場買/負=賣壓退)<extra></extra>'},
+    {type:'scatter', mode:'lines+markers', name:'全體資金水位(累積)', x, y:cumAll,
      line:{color:'#f59e0b', width:2, shape:'spline'}, marker:{size:4},
      fill:'tozeroy', fillcolor:'rgba(245,158,11,.10)',
-     hovertemplate:'%{x} 累積水位(全體):%{y:.1f} 億<extra></extra>'},
-    {type:'scatter', mode:'lines', name:'法人水位(累積)', x, y:cumMain,
+     hovertemplate:'%{x} 累積進場(全體):%{y:.1f} 億<extra></extra>'},
+    {type:'scatter', mode:'lines', name:'法人資金水位(累積)', x, y:cumMain,
      line:{color:'#c2703e', width:2, dash:'dot'},
-     hovertemplate:'%{x} 累積水位(法人):%{y:.1f} 億<extra></extra>'}
+     hovertemplate:'%{x} 累積進場(法人):%{y:.1f} 億<extra></extra>'}
   ];
   if(txHas) traces.push({type:'scatter', mode:'lines', name:'加權指數', x, y:tx, yaxis:'y2',
      connectgaps:true, line:{color:'#e2e8f0', width:2},
@@ -826,13 +828,13 @@ function renderPoolTide(){
   }
   const lay = {...pbase(), margin:{l:MB?60:96, r:MB?52:88, t:28, b:26}, showlegend:false, bargap:0.55,
      annotations:[{text:MB
-        ?'<b>池水位</b> 全'+sgn(cA)+'·<span style="color:#c2703e">法'+sgn(cM)+'</span>'+(txHas?'|<span style="color:#e2e8f0">指數'+(txPct!=null?(txPct>=0?'+':'')+txPct.toFixed(1)+'%':'')+'</span>':'')
-        :'<b>池水位</b>(視窗起點歸零累積,'+mode+')· 全體 '+sgn(cA)+' 億 · <span style="color:#c2703e">法人 '+sgn(cM)+' 億</span>'+(txHas?' · <span style="color:#e2e8f0">加權指數 '+(tx1!=null?nf0.format(Math.round(tx1)):'—')+(txPct!=null?'('+(txPct>=0?'+':'')+txPct.toFixed(1)+'%)':'')+'</span>':'')+'|<span style="color:#f59e0b">琥珀柱=入池(賣壓)</span>/<span style="color:#38bdf8">藍柱=出池(進場買貨)</span>'+(dec?' · <span style="color:#fbbf24">脫鉤'+(fdays.length?'▲▼'+fdays.length+'日':'—')+'(百億≈'+Math.round(dec.b*100)+'點)</span>':''),
+        ?'<b>資金水位</b>↑進↓賣 全'+sgn(cA)+'·<span style="color:#c2703e">法'+sgn(cM)+'</span>'+(txHas?'|<span style="color:#e2e8f0">指數'+(txPct!=null?(txPct>=0?'+':'')+txPct.toFixed(1)+'%':'')+'</span>':'')
+        :'<b>資金水位</b>(↑進場買/↓賣壓退,與指數同向;視窗起點歸零累積,'+mode+')· 全體 '+sgn(cA)+' 億 · <span style="color:#c2703e">法人 '+sgn(cM)+' 億</span>'+(txHas?' · <span style="color:#e2e8f0">加權指數 '+(tx1!=null?nf0.format(Math.round(tx1)):'—')+(txPct!=null?'('+(txPct>=0?'+':'')+txPct.toFixed(1)+'%)':'')+'</span>':'')+'|<span style="color:#38bdf8">↑藍柱=進場買</span>/<span style="color:#f59e0b">↓琥珀柱=賣壓退</span>'+(dec?' · <span style="color:#fbbf24">脫鉤'+(fdays.length?'▲▼'+fdays.length+'日':'—')+'(百億≈'+Math.round(-dec.b*100)+'點)</span>':''),
        xref:'paper', yref:'paper', x:0.01, y:1.16, showarrow:false,
        font:{size:MB?9.5:11.5, color:'#f59e0b'}, xanchor:'left'}],
      xaxis:{type:'category', gridcolor:css('--grid'), tickfont:{size:9.5}},
      yaxis:{gridcolor:css('--grid'), zerolinecolor:'#777', tickformat:'~s', range:rCum,
-       title:{text:MB?'累積':'水位=累積(億)', font:{size:10, color:css('--ink2')}}},
+       title:{text:MB?'進場累積':'資金水位=進場累積(億)', font:{size:10, color:css('--ink2')}}},
      yaxis3:{overlaying:'y', side:'right', range:rDay, showgrid:false, zeroline:false,
        showticklabels:false},
      yaxis2:{overlaying:'y', side:'right', tickformat:',d', range:rTx, showgrid:false, zeroline:false,
