@@ -18,8 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: 取出程式碼
+      - name: 取出程式碼(main 分支)
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: 安裝 Python
         uses: actions/setup-python@v5
