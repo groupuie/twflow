@@ -425,6 +425,25 @@ const noAnim = {animation:{duration:0}, responsive:true, maintainAspectRatio:fal
 $('#statusBadge').textContent = '盤後資料 · ' + DATA.meta.last_date;
 $('#metaline').textContent = `更新於 ${DATA.meta.generated_at}(台北)· 每交易日 22:05 自動更新` + (F.settle_note ? ` · ⚠ 鄰近台指期結算日(${F.settle_date})` : '');
 if(F.settle_note) $('#statusBadge').className='badge warn';
+/* ---- 資料新鮮度檢查(在瀏覽器端以「當下」判斷,避免『更新於』時間新、但資料其實過期而誤導) ---- */
+(function(){
+  const ld = DATA.meta.last_date; if(!ld) return;
+  const u = new Date();
+  const tpe = new Date(u.getTime() + (u.getTimezoneOffset() + 480) * 60000);  // 位移後:其 getUTC* 即台北牆鐘
+  const wknd = d => { const g = d.getUTCDay(); return g === 0 || g === 6; };
+  // 期望的最新交易日(純以台北「日期」運算,兩邊都用 UTC-midnight 基準避免時區偏移)
+  let exp = new Date(Date.UTC(tpe.getUTCFullYear(), tpe.getUTCMonth(), tpe.getUTCDate()));
+  if(wknd(exp)){ while(wknd(exp)) exp.setUTCDate(exp.getUTCDate() - 1); }       // 週末→回推週五
+  else if(tpe.getUTCHours() < 15){ do { exp.setUTCDate(exp.getUTCDate() - 1); } while(wknd(exp)); } // 今日未收盤→前一交易日
+  const p = ld.split('-'); const ldd = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+  let miss = 0, cur = new Date(exp);
+  while(cur.getTime() > ldd.getTime()){ if(!wknd(cur)) miss++; cur.setUTCDate(cur.getUTCDate() - 1); }
+  if(miss >= 1){
+    $('#statusBadge').className = 'badge warn';
+    $('#statusBadge').textContent = '盤後資料 · ' + ld + '  ⚠ 可能延遲';
+    $('#metaline').innerHTML += ` · <b style="color:var(--amber)">⚠ 資料日期落後約 ${miss} 個交易日,可能是自動更新未執行(若逢國定假日/颱風假可忽略)</b>`;
+  }
+})();
 
 /* ================================================================
    金流引擎(移植自使用者美股板:時間視窗/類別/目的地/Sankey/持續性/動畫/自訂)
