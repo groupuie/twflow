@@ -423,7 +423,7 @@ const noAnim = {animation:{duration:0}, responsive:true, maintainAspectRatio:fal
 
 /* ---------- header ---------- */
 $('#statusBadge').textContent = '盤後資料 · ' + DATA.meta.last_date;
-$('#metaline').textContent = `更新於 ${DATA.meta.generated_at}(台北)· 每交易日 22:05 自動更新` + (F.settle_note ? ` · ⚠ 鄰近台指期結算日(${F.settle_date})` : '');
+$('#metaline').textContent = `資料更新於 ${DATA.meta.generated_at}(台北)· 盤後每 30 分自動更新(13:30–22:00,有新資訊才更新)` + (F.settle_note ? ` · ⚠ 鄰近台指期結算日(${F.settle_date})` : '');
 if(F.settle_note) $('#statusBadge').className='badge warn';
 /* ---- 資料新鮮度檢查(在瀏覽器端以「當下」判斷,避免『更新於』時間新、但資料其實過期而誤導) ---- */
 (function(){

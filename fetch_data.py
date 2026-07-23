@@ -20,17 +20,24 @@ CONFIG = json.load(open(os.path.join(BASE_DIR, "config.json"), encoding="utf-8")
 TPE = ZoneInfo("Asia/Taipei")
 
 def _load_token():
-    # 本機 .env 優先;CI 無 .env 時退回環境變數(GitHub Actions 用 secret 注入)
+    # 1) 本機 .env(開發用,不進 repo)
     p = os.path.join(BASE_DIR, ".env")
     if os.path.exists(p):
         with open(p, encoding="utf-8") as f:
             for line in f:
                 if line.startswith("FINMIND_TOKEN="):
                     return line.strip().split("=", 1)[1].strip()
+    # 2) repo 內 token 檔(CI 用):優先於環境變數,避免設錯的 secret 蓋掉正確值
+    tf = os.path.join(BASE_DIR, "finmind_token.txt")
+    if os.path.exists(tf):
+        t = open(tf, encoding="utf-8").read().strip()
+        if t:
+            return t
+    # 3) 環境變數 / GitHub secret
     env = os.environ.get("FINMIND_TOKEN")
     if env:
         return env.strip()
-    raise RuntimeError("FINMIND_TOKEN 未設定(.env 或環境變數皆無)")
+    raise RuntimeError("FINMIND_TOKEN 未設定(.env / finmind_token.txt / 環境變數皆無)")
 
 TOKEN = _load_token()
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",

@@ -965,6 +965,13 @@ payload = {
 
 PAYLOAD_JSON = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 
+# 資料指紋:除 generated_at(每次都變)外的完整 payload 雜湊 → 供 run_daily 判斷「是否有新資訊」
+import hashlib as _hl
+_fp_src = json.dumps({**payload, "meta": {**payload["meta"], "generated_at": ""}},
+                     ensure_ascii=False, separators=(",", ":"))
+DATA_FP = _hl.sha1(_fp_src.encode("utf-8")).hexdigest()[:16]
+print("DATAFP " + DATA_FP)
+
 TEMPLATE = open(os.path.join(BASE_DIR, "dashboard_template.html"), encoding="utf-8").read()
 def _asset(name):
     return open(os.path.join(BASE_DIR, "assets", name), encoding="utf-8").read()
