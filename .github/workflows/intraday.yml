@@ -1,0 +1,33 @@
+name: 台股盤中採集
+
+on:
+  schedule:
+    # 台北 08:50 啟動長跑採集(整場輪詢至13:48,官方回補至14:40)。UTC=台北-8。
+    - cron: '50 0 * * 1-5'    # 主排程:台北 08:50
+    - cron: '15 1 * * 1-5'    # 備援:台北 09:15(若主排程已在跑/已完成會自動退出)
+  workflow_dispatch: {}       # 可在 Actions 頁手動啟動
+
+permissions:
+  contents: write             # 推送 intraday 分支(內建 GITHUB_TOKEN)
+
+concurrency:
+  group: twflow-intraday
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360      # 08:50→14:40 全程約 5h50m
+    steps:
+      - name: 取出程式碼(main 分支)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 盤中採集(輪詢證交所MIS/期交所,每分鐘推送 intraday 分支)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 intraday_collector.py
