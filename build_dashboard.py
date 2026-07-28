@@ -973,12 +973,8 @@ DATA_FP = _hl.sha1(_fp_src.encode("utf-8")).hexdigest()[:16]
 print("DATAFP " + DATA_FP)
 
 TEMPLATE = open(os.path.join(BASE_DIR, "dashboard_template.html"), encoding="utf-8").read()
-def _asset(name):
-    return open(os.path.join(BASE_DIR, "assets", name), encoding="utf-8").read()
-html = (TEMPLATE.replace("__PLOTLY__", _asset("plotly.min.js"))
-        .replace("__CHARTJS__", _asset("chart.umd.js"))
-        .replace("__ECHARTS__", _asset("echarts.min.js"))
-        .replace("__PAYLOAD__", PAYLOAD_JSON))
+# 圖表庫(Plotly/Chart.js/ECharts)已改為模板內 CDN 載入,不再內嵌 6MB+ 程式庫
+html = TEMPLATE.replace("__PAYLOAD__", PAYLOAD_JSON)
 with open(OUT_PATH, "w", encoding="utf-8") as f:
     f.write(html)
 print(f"OK dashboard.html ({len(html)//1024} KB), 資料日期 {LAST}, 全市場 {len(universe)} 檔進掃描")

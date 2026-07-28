@@ -4,9 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>台股資金流量儀表板</title>
-<script>__PLOTLY__</script>
-<script>__CHARTJS__</script>
-<script>__ECHARTS__</script>
+<!-- 圖表庫改由 CDN 載入(版本鎖定;瀏覽器快取後再訪幾乎秒開)。頁面由 6MB+ 瘦身至約 1/3。 -->
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.7.0/plotly.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+<script>/* CDN 備援:主來源失效時換源重載(極少發生) */
+(function(){
+  var alt={Plotly:'https://cdn.plot.ly/plotly-3.7.0.min.js',
+           Chart:'https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js',
+           echarts:'https://unpkg.com/echarts@5.6.0/dist/echarts.min.js'};
+  for(var g in alt) if(!window[g]) document.write('<scr'+'ipt src="'+alt[g]+'"><\/scr'+'ipt>');
+})();</script>
 <style>
 :root{
   color-scheme: dark;
@@ -137,6 +145,13 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
       <div class="note"><b style="color:#f43f5e">闖入者</b>=當日成交額 TOP20 中不在自選清單的標的,自動標紅、獨立類別 —— 抓市場當日異常。<b style="color:#22d3ee">自訂追蹤</b>=把任何代號釘進圖表(記在此瀏覽器;部署到 GitHub Pages 後可改用 gist 同步)。</div>
     </div>
     <div class="kpis" id="fkpis"></div>
+    <div class="card" id="mktLiveCard" style="display:none">
+      <h3 style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">盤中大盤與推估池流
+        <span class="badge ok" id="mliveTs"></span></h3>
+      <div class="sub" id="mliveStat" style="margin-bottom:4px"></div>
+      <div id="mlivechart" style="height:236px"></div>
+      <div class="note" id="mliveNote"></div>
+    </div>
     <div class="card" id="sec-cats">
       <h3>類別淨流向(資金在避險還是冒險?)</h3>
       <div id="cattiles" class="kpis" style="margin-bottom:0"></div>
@@ -345,9 +360,9 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
   </section>
 
   <footer>
-    資料來源:FinMind、臺灣證券交易所、證券櫃檯買賣中心、臺灣期貨交易所、集保結算所(股權分散表,每週更新)。
-    類別/掃描/輪動之「金額」為估算(買賣超股數 × 當日收盤價);大盤法人金額、期貨口數為官方統計。
-    每交易日 22:05(台北)自動更新。本儀表板僅供研究參考,非投資建議。
+    資料來源:FinMind、臺灣證券交易所(盤後統計+盤中 MIS 快照)、證券櫃檯買賣中心、臺灣期貨交易所(盤後+盤中報價)、集保結算所(股權分散表,每週更新)。
+    類別/掃描/輪動之「金額」為估算(買賣超股數 × 當日收盤價);大盤法人金額、期貨口數為官方統計;盤中推估池流為迴歸反推、非官方數據。
+    自動更新:盤中每分鐘(09:00–13:45)、盤後 13:30–22:00 每 30 分(有新資料才更新)。本儀表板僅供研究參考,非投資建議。
   </footer>
 </div>
 
@@ -423,7 +438,7 @@ const noAnim = {animation:{duration:0}, responsive:true, maintainAspectRatio:fal
 
 /* ---------- header ---------- */
 $('#statusBadge').textContent = '盤後資料 · ' + DATA.meta.last_date;
-$('#metaline').textContent = `資料更新於 ${DATA.meta.generated_at}(台北)· 盤後每 30 分自動更新(13:30–22:00,有新資訊才更新)` + (F.settle_note ? ` · ⚠ 鄰近台指期結算日(${F.settle_date})` : '');
+$('#metaline').textContent = `盤後資料更新於 ${DATA.meta.generated_at}(台北)· 自動更新:盤中每分鐘、盤後每 30 分(13:30–22:00,有新資料才更新)` + (F.settle_note ? ` · ⚠ 鄰近台指期結算日(${F.settle_date})` : '');
 if(F.settle_note) $('#statusBadge').className='badge warn';
 /* ---- 資料新鮮度檢查(在瀏覽器端以「當下」判斷,避免『更新於』時間新、但資料其實過期而誤導) ---- */
 (function(){
@@ -1685,6 +1700,94 @@ async function loadIntraday(){
   }catch(e){}
 }
 loadIntraday(); setInterval(loadIntraday, 60000);
+
+/* ---------- 盤中大盤與推估池流:GitHub Actions 採集器(intraday 分支,免金鑰全自動)---------- */
+const MLIVE_URL = (F.github&&F.github.user)
+  ? `https://raw.githubusercontent.com/${F.github.user}/${F.github.repo||'twflow'}/intraday/intraday.json` : null;
+let _mliveJ=null, _mliveDrawn='';
+function mliveActive(){   // 需要頻繁輪詢的時段:08:54–14:50(台北)平日
+  const t=tpeNow(); if(t.getDay()===0||t.getDay()===6) return false;
+  const hm=t.getHours()*100+t.getMinutes(); return hm>=854 && hm<=1450;
+}
+async function loadMktLive(){
+  if(!MLIVE_URL || location.protocol==='file:') return;
+  if(document.visibilityState==='hidden') return;
+  if(_mliveJ && _mliveJ.complete && !mliveActive()) return;   // 收盤資料已到手,盤外不再輪詢
+  try{
+    const r = await fetch(MLIVE_URL+'?v='+Math.floor(Date.now()/30000), {cache:'no-store'});
+    if(!r.ok) return;
+    const J = await r.json();
+    if(!J || !J.series || !J.series.length || !(J.y&&J.y.tw)) return;
+    _mliveJ=J; renderMktLive(J);
+  }catch(e){}
+}
+function renderMktLive(J){
+  const key=J.updated+'|'+(window.innerWidth<680); if(key===_mliveDrawn) return; _mliveDrawn=key;
+  const MB=(window.innerWidth||1024)<680;
+  const card=$('#mktLiveCard'); card.style.display='block';
+  const yTW=J.y.tw, cur=J.cur||{}, z=cur.tw, live=!J.complete;
+  const today=tpeNow().toISOString().slice(0,10);
+  $('#mliveTs').textContent=(live?'● 盤中 ':'收盤 ')+(J.date===today?'':J.date+' ')+
+    (live?(cur.tw_t||''):'')+(live?'':' 完整曲線')+(J.official_tw?' ✓官方回補':'');
+  // 推估池流量:反用脫鉤迴歸(chg = a + b·pf,pf 正=入池賣壓)→ pf=(chg−a)/b;顯示口徑翻轉(正=進場買)
+  const dec=window.__DEC||decoupleCalc();
+  const disp=v=>(dec&&dec.b)?-( (v-yTW-dec.a)/dec.b ):null;
+  const err=(dec&&dec.b)?Math.abs(dec.sig/dec.b):null;
+  // 統計列
+  const dz=z!=null?z-yTW:null, dzp=dz!=null?dz/yTW*100:null;
+  const ot=cur.ot, oty=J.y.ot, otp=(ot&&oty)?(ot-oty)/oty*100:null;
+  const fu=cur.fu, basis=(fu&&z)?fu-z:null;
+  const ef=z!=null?disp(z):null;
+  const amtY=J.amt_final_mn?J.amt_final_mn/100:null;
+  const pcs=[];
+  if(z!=null) pcs.push(`加權 <b>${nf0.format(Math.round(z))}</b> <span class="${cls(dz)}">${sgn(dz,nf0)}(${dzp>=0?'+':''}${dzp.toFixed(2)}%)</span>`);
+  if(otp!=null) pcs.push(`櫃買 <span class="${cls(otp)}">${otp>=0?'+':''}${otp.toFixed(2)}%</span>`);
+  if(fu) pcs.push(`台指期近月 ${nf0.format(Math.round(fu))}<span class="${cls(basis)}">(${basis>=0?'+':''}${nf0.format(Math.round(basis))})</span>`);
+  if(ef!=null) pcs.push(`推估池流 <b class="${cls(ef)}">${sgn(ef,nf0)} 億</b>±${nf0.format(Math.round(err||0))}<span style="color:var(--muted)">(${ef>=0?'進場買':'賣壓入池'};迴歸反推)</span>`);
+  if(amtY) pcs.push(`成交 ${nf0.format(Math.round(amtY))} 億`);
+  $('#mliveStat').innerHTML=pcs.join(' · ');
+  // 圖:加權(白)+台指期近月(紫,至13:45)+昨收虛線;右軸=同曲線的「推估池流量」刻度
+  const rows=J.series, x=rows.map(r=>r[0]);
+  const tw=rows.map(r=>r[1]), fus=rows.map(r=>r[3]);
+  const twv=tw.filter(v=>v!=null), fuv=fus.filter(v=>v!=null);
+  // 大跌/大漲日:昨收若離當日區間太遠,不硬塞進座標(避免曲線被壓扁),改在邊緣標示
+  const dv=twv.concat(fuv), dmn=Math.min(...dv), dmx=Math.max(...dv), dspan=(dmx-dmn)||1;
+  const yInRange = yTW>=dmn-0.5*dspan && yTW<=dmx+0.5*dspan;
+  const allv=yInRange?dv.concat([yTW]):dv;
+  const pad=(Math.max(...allv)-Math.min(...allv))*0.08+1;
+  const rIdx=[Math.min(...allv)-pad, Math.max(...allv)+pad];
+  const traces=[
+    {type:'scatter',mode:'lines',name:'加權指數',x,y:tw,connectgaps:true,
+     line:{color:'#e2e8f0',width:2},hovertemplate:'%{x} 加權 %{y:,.2f}<extra></extra>'}];
+  if(fuv.length) traces.push({type:'scatter',mode:'lines',name:'台指期近月',x,y:fus,connectgaps:true,
+     line:{color:'rgba(232,121,249,.75)',width:1.4},hovertemplate:'%{x} 台指期 %{y:,.0f}<extra></extra>'});
+  if(dec&&dec.b) traces.push({x:[x[0]],y:[disp(rIdx[0])],yaxis:'y2',type:'scatter',mode:'markers',
+     marker:{opacity:0},hoverinfo:'skip',showlegend:false});
+  let hourTicks=x.filter(t=>t.endsWith(':00'));
+  if(hourTicks.length<2){ const st=Math.max(1,Math.floor(x.length/(MB?4:7))); hourTicks=x.filter((t,i)=>i%st===0); }
+  const shapes=[], anns=[];
+  if(yInRange){
+    shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:yTW,y1:yTW,
+                 line:{color:'rgba(148,163,184,.55)',width:1,dash:'dash'}});
+    anns.push({text:'昨收 '+nf0.format(Math.round(yTW)),xref:'paper',x:1,xanchor:'right',
+               yref:'y',y:yTW,yanchor:'bottom',showarrow:false,font:{size:9.5,color:'rgba(148,163,184,.9)'}});
+  }else{
+    anns.push({text:(yTW>dmx?'↑昨收 ':'↓昨收 ')+nf0.format(Math.round(yTW))+'(距圖緣 '+nf0.format(Math.round(yTW>dmx?yTW-dmx:dmn-yTW))+' 點)',
+               xref:'paper',x:1,xanchor:'right',yref:'paper',y:yTW>dmx?0.98:0.02,
+               yanchor:yTW>dmx?'top':'bottom',showarrow:false,font:{size:9.5,color:'rgba(148,163,184,.9)'}});
+  }
+  const lay={...pbase(),margin:{l:MB?46:58,r:(dec&&dec.b)?(MB?52:66):14,t:6,b:30},showlegend:false,
+    shapes, annotations:anns,
+    xaxis:{type:'category',tickvals:hourTicks,gridcolor:css('--grid'),tickfont:{size:10}},
+    yaxis:{range:rIdx,gridcolor:css('--grid'),tickfont:{size:10},tickformat:',.0f',
+           title:{text:MB?'':'指數(點)',font:{size:10}}},
+    yaxis2:(dec&&dec.b)?{range:[disp(rIdx[0]),disp(rIdx[1])],overlaying:'y',side:'right',
+           tickfont:{size:10,color:'#7dd3fc'},tickformat:'+,.0f',showgrid:false,
+           title:{text:MB?'':'推估池流(億)',font:{size:10,color:'#7dd3fc'}}}:undefined};
+  Plotly.react('mlivechart',traces,lay,PCFG);
+  $('#mliveNote').innerHTML=`<b>推估池流量=迴歸反推、非官方數據</b>:依近 ${dec?dec.n:'—'} 個交易日「指數日漲跌 ↔ 池單日流量」迴歸(百億≈${dec?Math.round(-dec.b*100):'—'} 點)把盤中指數漲跌換算成隱含池流量,右軸刻度即此換算;誤差 ±${err?nf0.format(Math.round(err)):'—'} 億(1σ),實際盤後資料 13:30 起陸續公布、以下方各表為準。指數=證交所 MIS 約 5 秒快照(收盤後以官方每 5 秒指數回補${J.official_tw?',本圖已回補':''});<span style="color:rgba(232,121,249,.9)">紫線=台指期近月</span>(交易至 13:45,可見期貨對現貨的領先/收斂)。盤中每分鐘由 GitHub Actions 自動採集推送。`;
+}
+if(MLIVE_URL){ loadMktLive(); setInterval(loadMktLive, 60000); }
 
 applyTheme('dark');
 </script>
