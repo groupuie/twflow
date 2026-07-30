@@ -830,6 +830,26 @@ def do_update():
     if miss:
         log(f"快照缺 {len(miss)} 日待補:{miss[0]} ~ {miss[-1]}")
         snapshot_days(conn, miss)
+    # 盤後資料「分批公布」自癒:收盤價 ~13:35、三大法人(T86)~15:00-16:00、融資券 ~21:00。
+    # 每 30 分排程若在早段先建了當日快照,晚公布的欄位會整片 NULL 且之後不再回補
+    # (2026-07-24~29 散戶/法人數字因此缺漏)。修復:
+    #   - 當日:只要融資券還沒齊(margin 覆蓋率<50%)就每輪重抓整日快照 → 法人 16:00 後、
+    #     融資 21:00 後自動補齊;齊了就不再抓。upsert 冪等,單日僅 ~7 個請求。
+    #   - 過去日:偵測法人(total_net)或融資(margin_bal)覆蓋率過低者重抓。
+    heal = []
+    for d in flow_days[-10:]:
+        r = conn.execute("SELECT COUNT(*), "
+                         "SUM(CASE WHEN margin_bal IS NOT NULL THEN 1 ELSE 0 END), "
+                         "SUM(CASE WHEN total_net IS NOT NULL THEN 1 ELSE 0 END) "
+                         "FROM mkt_daily WHERE date=?", (d,)).fetchone()
+        n, mb, ti = (r[0] or 0), (r[1] or 0), (r[2] or 0)
+        if n <= 500:
+            continue                      # 空/殘缺日由上面的 missing 流程處理
+        if (d == today and mb < n * 0.5) or (d != today and (mb < n * 0.5 or ti < n * 0.3)):
+            heal.append(d)
+    if heal:
+        log(f"盤後欄位未齊(法人/融資券),重抓 {len(heal)} 日快照:{heal}")
+        snapshot_days(conn, heal)
     fetch_fx(conn, lookback)
     fetch_futures(conn, lookback)
     # 市場成交統計(權證金額等):補最近缺的交易日

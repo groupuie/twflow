@@ -712,12 +712,21 @@ function renderDest(catSplit, subtitle, fixRange){
     const dv = x.m*x.r<0 && Math.min(Math.abs(x.m),Math.abs(x.r))>2;   // ⚡ 門檻 NT$2 億
     ann.push(tipLab(net,pos,neg,Mc,'y',x.c,dv?' ⚡':'',MB?9:10.5,dv?'#fbbf24':css('--ink2')));
   });
-  const pNet = poolM+poolR2, pPos = Math.max(0,poolM)+Math.max(0,poolR2), pNeg = Math.min(0,poolM)+Math.min(0,poolR2);
+  // 池下軌「同向化」:柱方向跟類別軸一致 —— 入池(賣出離場)朝左、出池(買入進場)朝右
+  // (畫的是 −池變化=現貨淨買賣方向;數字與文字仍以池口徑標示)
+  const pNet = poolM+poolR2, nM = -poolM, nR = -poolR2, nNet = -pNet;
+  const nPos = Math.max(0,nM)+Math.max(0,nR), nNeg = Math.min(0,nM)+Math.min(0,nR);
   const pDv = poolM*poolR2<0 && Math.min(Math.abs(poolM),Math.abs(poolR2))>2;
-  ann.push(tipLab(pNet,pPos,pNeg,Mp,'y2','Σ 現金池',(pNet>=0?'(入池)':'(出池)')+(pDv?' ⚡':''),MB?9.5:11.5,'#f59e0b'));
+  const pTip = nNet>=0?nPos:nNeg, pIn = Math.abs(pTip) > 0.58*Mp;
+  ann.push({text:(pNet>=0?'入池 ':'出池 ')+nf1.format(Math.abs(pNet))+(pNet>=0?'(賣出離場)':'(買入進場)')+(pDv?' ⚡':''),
+    xref:'x2', yref:'y2', x:pTip, y:'Σ 現金池',
+    xanchor:nNet>=0?(pIn?'right':'left'):(pIn?'left':'right'),
+    xshift:nNet>=0?(pIn?-3:4):(pIn?3:-4), showarrow:false,
+    font:{size:MB?9.5:11.5, color:'#f59e0b'},
+    bgcolor:pIn?'rgba(13,13,13,.68)':undefined, borderpad:pIn?1:undefined});
   const inSettle = F.settle_date && (typeof winDates==='function') && winDates().includes(F.settle_date);
-  ann.push({text:(MB?'深=法人 淺=信用戶|⚡=反向|期貨=部位增減不入池|下軌=池刻度'
-      :'深色=三大法人(機構,盤後)・淺色=融資−融券增減(信用散戶估,盤後)|紅=流出 綠=流入|⚡=機構散戶反向(轉折觀察)|期貨=法人未平倉部位增減拆多空(不入池)|下軌=池專屬刻度')
+  ann.push({text:(MB?'深=法人 淺=信用戶|⚡=反向|期貨=部位增減不入池|下軌=池(同向:左入池/右出池)'
+      :'深色=三大法人(機構,盤後)・淺色=融資−融券增減(信用散戶估,盤後)|紅=流出 綠=流入|⚡=機構散戶反向(轉折觀察)|期貨=法人未平倉部位增減拆多空(不入池)|下軌=池,與上方同向:←入池(賣出離場)/出池(買入進場)→')
       +(inSettle?(MB?'|<span style="color:#f59e0b">⚠含結算日</span>':'|<span style="color:#f59e0b">⚠ 窗含期貨結算日('+F.settle_date.slice(5)+'):期貨部位含到期機械性增減,判讀打折</span>'):''),
     xref:'paper', yref:'paper', x:0.01, y:1.045, showarrow:false, font:{size:MB?8.5:10, color:css('--muted')}, xanchor:'left'});
   const mb0 = DATA.overview?.kpi?.margin_bal_yi, dp = (DATA.hot?.pools?.draw||[]).slice(-1)[0];
@@ -734,10 +743,12 @@ function renderDest(catSplit, subtitle, fixRange){
      hovertemplate:'%{y} 法人:%{x:.1f} 億<extra></extra>'},
     {type:'bar', orientation:'h', x:rV, y:cats, marker:{color:rCol},
      hovertemplate:'%{y} 信用戶(融資−融券,散戶估):%{x:.1f} 億<extra></extra>'},
-    {type:'bar', orientation:'h', x:[poolM], y:['Σ 現金池'], xaxis:'x2', yaxis:'y2', width:0.5,
-     marker:{color:'#f59e0b'}, hovertemplate:'法人池:%{x:.1f} 億<extra></extra>'},
-    {type:'bar', orientation:'h', x:[poolR2], y:['Σ 現金池'], xaxis:'x2', yaxis:'y2', width:0.5,
-     marker:{color:'#fde68a'}, hovertemplate:'散戶池:%{x:.1f} 億<extra></extra>'}
+    {type:'bar', orientation:'h', x:[-poolM], y:['Σ 現金池'], xaxis:'x2', yaxis:'y2', width:0.5,
+     marker:{color:'#f59e0b'},
+     hovertemplate:'法人池:'+(poolM>=0?'入池(賣出)':'出池(買入)')+' '+nf1.format(Math.abs(poolM))+' 億<extra></extra>'},
+    {type:'bar', orientation:'h', x:[-poolR2], y:['Σ 現金池'], xaxis:'x2', yaxis:'y2', width:0.5,
+     marker:{color:'#fde68a'},
+     hovertemplate:'散戶池:'+(poolR2>=0?'入池(賣出)':'出池(買入)')+' '+nf1.format(Math.abs(poolR2))+' 億<extra></extra>'}
   ],
     {...pbase(), barmode:'relative', bargap:0.3,
      margin:{l:MB?60:96, r:MB?14:56, t:mT, b:mB},
