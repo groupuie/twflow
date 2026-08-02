@@ -104,7 +104,7 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
 .ckbar .ck.on{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:600}
 .ckbar .ck.off{opacity:.55}
 .ckbar .sep{width:1px;height:16px;background:var(--grid);margin:0 3px}
-#cockpit{height:940px}
+#cockpit{height:940px;touch-action:pan-y}
 #chipflow{height:420px}
 #chipcost{height:400px}
 #chipstock{padding:4px 0}
@@ -1671,7 +1671,11 @@ const CKS = {sym:null,
              fidx:'idx',     // 池圖疊加:'none' | 'px' | 'idx' | 'both'
              flow:{tot:true,f:true,t:true,d:false,m:false,s:false,x:true}};
 const CK_DEF = {win:120, off:0};                  // 復原用
-const CK_ZSTEP = 1.14;                            // 每格滾輪的縮放倍率(連續)
+// 縮放倍率依 wheel delta 連續換算(exp),不是每個事件固定一格 ——
+// 觸控板一次滑動會送出幾十個小 delta,固定倍率會又跳又過衝。
+const CK_ZK = 0.0022;                             // delta → 對數縮放係數
+const ckZoomFactor = dy => Math.exp(Math.max(-1.2, Math.min(1.2, dy*CK_ZK)));
+const CK_ZSTEP = 1.14;                            // 按鈕/測試用的固定一格
 const CK_WMIN = 10;                               // 最小視窗(天)
 // 現金池配色比照美股板 CPAL:全單累積線 poolA='#fab219'(琥珀黃)、次線 poolM='#c2703e'
 const CPOOL={f:'#3987e5',t:'#34d399',d:'#9085e9',m:'#22d3ee',s:'#f472b6',
@@ -1933,6 +1937,33 @@ function ckFlows(J,vf){
   return out;
 }
 
+/* 目前可視範圍對應的座標設定。縮放/平移時只把這包丟給 Plotly.relayout,
+   不重建 trace —— 這是讓滾輪跟得上手的關鍵(美股板 xzApply 同樣做法)。 */
+function ckViewRanges(R,sl,MB,local){
+  const V=R.slice(sl.s,sl.e);
+  if(!V.length) return {};
+  const hi=Math.max(...V.map(r=>r.h)), lo=Math.min(...V.map(r=>r.l));
+  const pad=(hi-lo)*0.06||Math.max(hi*0.01,0.5);
+  let vmax=0, pmn=Infinity, pmx=-Infinity;
+  let ct=0, ci=0;
+  for(let i=sl.s;i<sl.e;i++){                        // 池軌累積自視窗起點,與 ⑤ 軌畫法一致
+    ct+=(R[i].fl && R[i].fl.tot)||0; ci+=(R[i].fl?R[i].fl.inst:0)||0;
+    vmax=Math.max(vmax,R[i].v||0);
+    pmn=Math.min(pmn,0,ct,ci); pmx=Math.max(pmx,0,ct,ci);
+  }
+  const ppad=(pmx-pmn)*0.08||1;
+  const nT=MB?7:14, step=Math.max(1,Math.ceil(V.length/nT)), tv=[],tt=[];
+  for(let k=sl.e-1;k>=sl.s;k-=step){
+    const d=String(R[k].d); tv.unshift(d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8));
+    tt.unshift(d.slice(4,6)+'-'+d.slice(6,8));
+  }
+  return {'xaxis.range':[sl.s-0.5, sl.e-0.5],
+          'xaxis.tickvals':tv, 'xaxis.ticktext':tt,
+          'yaxis.range':[lo-pad, hi+pad],
+          'yaxis7.range':[0, vmax*1.08||1],
+          'yaxis10.range':[pmn-ppad, pmx+ppad]};
+}
+
 /* 連續視窗切片:win 為浮點天數、off 為右緣往回位移 */
 function ckSlice(R){
   const n=R.length;
@@ -2042,9 +2073,9 @@ function ckBuildBars(){
   document.querySelectorAll('#ckSymBar .ck,#ckWinBar .ck,#ckOptBar .ck').forEach(b=>{
     b.onclick=()=>{ if(b.disabled||b.id==='ckAdd') return;
       const k=b.dataset.ck, v=b.dataset.v;
-      if(k==='sym'){ CKS.sym=v; CKS.off=0; }
-      else if(k==='win'){ CKS.win = v==='max'?'max':+v; CKS.off=0; }
-      else if(k==='reset'){ CKS.win=CK_DEF.win; CKS.off=CK_DEF.off; }
+      if(k==='sym'){ CKS.sym=v; CKS.off=0; CKS._winf=null; }
+      else if(k==='win'){ CKS.win = v==='max'?'max':+v; CKS.off=0; CKS._winf=(v==='max'?null:+v); }
+      else if(k==='reset'){ CKS.win=CK_DEF.win; CKS.off=CK_DEF.off; CKS._winf=CK_DEF.win; }
       else if(k==='vol'){ CKS.vol=v; }
       else { CKS[v]=!CKS[v]; }
       ckBuildBars(); ckShow(); };
@@ -2085,43 +2116,102 @@ async function ckShow(){
   ckBindZoom();
 }
 
-/* ---------- 滾輪連續縮放 + 拖曳平移 ----------
-   不用 Plotly 內建 scrollZoom:多子圖 + category 主軸下它「拖曳有效、滾輪無效」(美股板原始碼實測),
-   改成自己在 capture 階段攔 wheel。縮放以游標所在的那一根為錨,所以放大時盯著的位置不會跑掉。 */
-let _ckZT=null;
+/* ---------- 連續縮放:滾輪(桌機)/ 雙指(手機)+ 拖曳平移 ----------
+   關鍵在「縮放時不重建 trace」:trace 一次畫完全區間,互動期間只用 Plotly.relayout 改 x/y 軸範圍,
+   並用 requestAnimationFrame 節流到每幀最多一次 —— 每格滾輪都 Plotly.react 重建 15 條 trace 會很頓。
+   停手 220ms 後才做一次完整重繪,把 TD9 位移量、字級、趨勢線/型態這些跟可視幅度有關的幾何算回正確值。
+   手機:單指不攔截(交給 CSS touch-action:pan-y 讓頁面正常上下滑),只有雙指才進縮放。 */
+let _ckRaf=0, _ckSettle=null;
+function ckApplyView(){
+  _ckRaf=0;
+  const J=CKD[CKS.sym];
+  if(!J||typeof J!=='object') return;
+  CKS._fast=true;                    // 互動中:簡化模式(不畫 TD9 數字/事件/觸線圈/型態/燈號)
+  ckRender(J);                       // 只重畫駕駛艙,下三區等停手後再說
+  ckWinLab();
+}
+function ckViewDirty(){
+  if(!_ckRaf) _ckRaf=requestAnimationFrame(ckApplyView);
+  clearTimeout(_ckSettle);
+  _ckSettle=setTimeout(()=>{                       // 停手 → 補完整畫面 + 更新下面三張圖
+    const J=CKD[CKS.sym];
+    CKS._fast=false;
+    if(J&&typeof J==='object'){ ckRender(J); ckLower(J); }
+  }, 180);
+}
+function ckZoomAt(frac, factor){
+  const J=CKD[CKS.sym]; if(!J||typeof J!=='object') return;
+  const R=ckRows(J), n=R.length, sl=ckSlice(R);
+  const anchor=sl.s+frac*(sl.e-sl.s);              // 錨:游標(或雙指中點)所在的那一根
+  const cur=(typeof CKS._winf==='number')?CKS._winf:(sl.e-sl.s);
+  const wf=Math.max(CK_WMIN, Math.min(n, cur*factor));       // 保留小數 → 連續縮放不會卡在整數
+  CKS._winf=wf;
+  const w1=Math.round(wf), st1=Math.round(anchor-frac*w1);
+  CKS.win=w1;
+  CKS.off=Math.max(0, Math.min(n-w1, n-(st1+w1)));
+  ckViewDirty();
+}
+function ckPanBars(bars){
+  const J=CKD[CKS.sym]; if(!J||typeof J!=='object') return;
+  const R=ckRows(J), n=R.length;
+  CKS.off=Math.max(0, Math.min(n-CKS.win, Math.round(bars)));
+  ckViewDirty();
+}
 function ckBindZoom(){
   const el=ckEl(); if(!el || el._ckZ) return; el._ckZ=1;
-  const redraw=()=>{ clearTimeout(_ckZT); _ckZT=setTimeout(()=>{
-    const J=CKD[CKS.sym]; if(J&&typeof J==='object'){ ckRender(J); ckLower(J); ckWinLab(); } },35); };
+  const fracOf=cx=>{ const r=el.getBoundingClientRect();
+    return Math.min(1,Math.max(0,(cx-r.left-30)/Math.max(1,r.width-90))); };
+
   el.addEventListener('wheel', ev=>{
     if(!CKS.zoom || CKS.win==='max') return;
     ev.preventDefault(); ev.stopPropagation();
-    const J=CKD[CKS.sym]; if(!J||typeof J!=='object') return;
-    const R=ckRows(J), n=R.length, sl=ckSlice(R);
-    const rc=el.getBoundingClientRect();
-    const fr=Math.min(1,Math.max(0,(ev.clientX-rc.left-40)/Math.max(1,rc.width-100)));  // 游標在視窗中的相對位置
-    const anchor=sl.s+fr*sl.rows.length;                       // 錨定的全域索引
-    const w0=sl.rows.length;
-    const w1=Math.max(CK_WMIN, Math.min(n, Math.round(w0*(ev.deltaY>0?CK_ZSTEP:1/CK_ZSTEP))));
-    const st1=Math.round(anchor-fr*w1);
-    CKS.win=w1; CKS.off=Math.max(0, Math.min(n-w1, n-(st1+w1)));
-    redraw();
+    const dy = ev.deltaMode===1 ? ev.deltaY*16 : (ev.deltaMode===2 ? ev.deltaY*400 : ev.deltaY);
+    ckZoomAt(fracOf(ev.clientX), ckZoomFactor(dy));
   }, {passive:false, capture:true});
 
-  let drag=null;
+  const P=new Map();                                // 目前按住的指標(滑鼠 or 手指)
+  let base=null;
+  const dist=()=>{ const a=[...P.values()]; return Math.hypot(a[0].x-a[1].x, a[0].y-a[1].y)||1; };
+  const midX=()=>{ const a=[...P.values()]; return (a[0].x+a[1].x)/2; };
+
   el.addEventListener('pointerdown', ev=>{
-    if(!CKS.zoom || CKS.win==='max') return;
-    drag={x:ev.clientX, off:CKS.off, w:CKS.win, rc:el.getBoundingClientRect()};
+    if(CKS.win==='max') return;
+    // 手機單指:完全不攔截,讓頁面照常上下滑動(雙指才是縮放手勢)
+    if(ev.pointerType==='touch'){
+      P.set(ev.pointerId,{x:ev.clientX,y:ev.clientY});
+      if(P.size===2){ base={d:dist(), off:CKS.off, w:CKS.win, frac:fracOf(midX()), mx:midX()}; }
+      return;
+    }
+    if(!CKS.zoom) return;
+    P.set(ev.pointerId,{x:ev.clientX,y:ev.clientY});
+    base={drag:true, x:ev.clientX, off:CKS.off, w:CKS.win, rw:el.getBoundingClientRect().width};
     el.setPointerCapture(ev.pointerId); el.style.cursor='grabbing';
   });
+
   el.addEventListener('pointermove', ev=>{
-    if(!drag) return;
-    const perBar=Math.max(1e-6,(drag.rc.width-100)/drag.w);
-    CKS.off=drag.off+Math.round((ev.clientX-drag.x)/perBar);   // 右拖 = 看更早的資料
-    redraw();
-  });
-  const end=()=>{ drag=null; el.style.cursor=CKS.zoom?'grab':''; };
-  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+    if(!P.has(ev.pointerId)) return;
+    P.set(ev.pointerId,{x:ev.clientX,y:ev.clientY});
+    if(!base) return;
+    if(P.size>=2){                                  // 雙指:縮放 + 隨中點平移
+      ev.preventDefault();
+      const f=base.d/dist();                        // 指距變大 → 視窗變小(放大)
+      const n=ckRows(CKD[CKS.sym]).length;
+      const w1=Math.max(CK_WMIN, Math.min(n, Math.round(base.w*f)));
+      const anchor=(n-base.off-base.w)+base.frac*base.w;
+      const st1=Math.round(anchor-base.frac*w1);
+      CKS.win=w1; CKS.off=Math.max(0, Math.min(n-w1, n-(st1+w1)));
+      ckViewDirty();
+    } else if(base.drag){                           // 滑鼠拖曳平移
+      const perBar=Math.max(1e-6,(base.rw-90)/base.w);
+      ckPanBars(base.off+(ev.clientX-base.x)/perBar);
+    }
+  }, {passive:false});
+
+  const end=ev=>{ P.delete(ev.pointerId); if(P.size<2) base=null;
+    el.style.cursor=CKS.zoom?'grab':''; };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('pointerleave', end);
 }
 function ckWinLab(){
   const e=document.getElementById('ckWinLab'); if(!e) return;
@@ -2134,15 +2224,26 @@ function ckRender(J){
   if(CKS.win==='max') return ckRenderMax(J,el,MB);
   const R=ckRows(J);
   if(!R.length){ ckMsg('歷史不足(駕駛艙需 ≥240 根日K)'); return; }
-  const sl=ckSlice(R), Rw=sl.rows, li=Rw.length-1, win=Rw.length;
+  // 只畫可視切片:Plotly 會把 trace 的每個點都渲染再裁切,全區間 900 點的 relayout
+  // 實測 232–544ms,比只畫 120 點的完整重繪(~40ms)還慢。互動的順暢度來自
+  //   (a) trace 保持小、(b) rAF 節流、(c) 互動期間不連帶重畫下面兩張圖(那才是原本卡的主因)。
+  const sl=ckSlice(R);
+  const _FAST=!!CKS._fast;
+  // 互動中降採樣:視窗 >320 根時每根 K 棒寬度已不到 2px,抽樣不影響視覺,
+  // 但可以把 SVG 元素數壓在固定上限 → 大視窗拖曳一樣跟得上手。停手後畫完整資料。
+  const _step=(_FAST && sl.rows.length>320) ? Math.ceil(sl.rows.length/320) : 1;
+  const Rw = _step>1 ? sl.rows.filter((_,i)=>i%_step===0 || i===sl.rows.length-1) : sl.rows;
+  const V=Rw, li=Rw.length-1, win=sl.rows.length, gi0=0;
   if(!Rw.length){ ckMsg('視窗無資料'); return; }
+  const lastV=Rw[li];
 
   /* 快取鍵:所有會改變畫面的狀態都必須在這裡,否則按了不重繪(美股板已知地雷) */
   const sig=[J.sid,J.gen,win,sl.s,Rw[li].d,Rw[li].c.toFixed(3),MB?'m':'d',
              CKS.ma?'a1':'a0',CKS.td?'t1':'t0',CKS.ev?'e1':'e0',CKS.vol,'i'+CKS.ind,
              CKS.pool?'p1':'p0',CKS.idx?'x1':'x0',CKS.tl?'l1':'l0',CKS.fib?'f1':'f0',
-             CKS.pat?'q1':'q0',CKS.sig?'g1':'g0',CKS.zoom?'z1':'z0'].join(':');
-  if(el.dataset.sig===sig && el.querySelector('.plot-container')) return;
+             CKS.pat?'q1':'q0',CKS.sig?'g1':'g0',CKS.zoom?'z1':'z0',
+             CKS._fast?'F':'-'].join(':');
+  if(el.dataset.sig===sig && el.querySelector('.plot-container')){ ckWinLab(); return; }
 
   // ⚠ category 軸的類別值必須唯一。美股板用 'MM-DD',視窗 >1 年時日期會重複,
   //   Plotly 會把重複類別摺疊到同一位置 → K棒錯位、均線變成水平線。改用完整日期當類別,
@@ -2151,17 +2252,27 @@ function ckRender(J){
   const nT=MB?7:14, step=Math.max(1,Math.ceil(Rw.length/nT));
   const tickV=[],tickT=[];
   for(let k=Rw.length-1;k>=0;k-=step){ tickV.unshift(x[k]); tickT.unshift(x[k].slice(5)); }
-  const rng=Math.max(...Rw.map(r=>r.h))-Math.min(...Rw.map(r=>r.l))||1;
+  const vHi=Math.max(...V.map(r=>r.h)), vLo=Math.min(...V.map(r=>r.l));
+  const rng=(vHi-vLo)||1;
   const o1=rng*0.016, o2=rng*0.036, o3=rng*0.075;
   const smallF=win>120?6.5:7.5, midF=win>120?8:9, dense=MB&&win>60;
-  const gi=R.length-win;                                   // Rw[k] 對應 R[gi+k]
-  const visS=ckTdVis(R.map(r=>r.tds0)), visB=ckTdVis(R.map(r=>r.tdb0));
-  const liveS=ckLive(R.map(r=>r.tds0)), liveB=ckLive(R.map(r=>r.tdb0));
+  const gi=sl.s;                                           // Rw[k] 對應 R[gi+k](未降採樣時)
+  // TD 段可見性只跟資料有關、與縮放無關 → 快取在 J 上。
+  // 原本每次重繪都要對 900 根做 4 次全掃 + 4 次陣列配置,縮放時這是最貴的一段。
+  if(!J._td){
+    const S=R.map(r=>r.tds0), B=R.map(r=>r.tdb0);
+    J._td={visS:ckTdVis(S), visB:ckTdVis(B), liveS:ckLive(S), liveB:ckLive(B)};
+  }
+  const {visS,visB,liveS,liveB}=J._td;
 
-  const tr=[{type:'candlestick',x,open:Rw.map(r=>r.o),high:Rw.map(r=>r.h),low:Rw.map(r=>r.l),close:Rw.map(r=>r.c),
-    increasing:{line:{color:CPAL.up,width:1},fillcolor:CPAL.up},
-    decreasing:{line:{color:CPAL.dn,width:1},fillcolor:CPAL.dn},
-    name:'還原K', showlegend:false, xaxis:'x', yaxis:'y'}];
+  const FAST=!!CKS._fast;              // 互動中:簡化繪製,停手 180ms 後補完整版本
+  const tr=[ FAST
+    ? {type:'scatter',mode:'lines',x,y:Rw.map(r=>r.c),name:'還原收盤',showlegend:false,
+       line:{color:'rgba(226,232,240,.9)',width:1.2},hoverinfo:'skip',xaxis:'x',yaxis:'y'}
+    : {type:'candlestick',x,open:Rw.map(r=>r.o),high:Rw.map(r=>r.h),low:Rw.map(r=>r.l),close:Rw.map(r=>r.c),
+       increasing:{line:{color:CPAL.up,width:1},fillcolor:CPAL.up},
+       decreasing:{line:{color:CPAL.dn,width:1},fillcolor:CPAL.dn},
+       name:'還原K', showlegend:false, xaxis:'x', yaxis:'y'}];
 
   if(CKS.ma){
     [['季線60D','m60',CPAL.ma1],['半年線120D','m120',CPAL.ma2],['年線240D','m240',CPAL.ma3],
@@ -2176,12 +2287,12 @@ function ckRender(J){
   const tsY=[],tsT=[],tsS=[],tsC=[],tbY=[],tbT=[],tbS=[],tbC=[];
   Rw.forEach((r,k)=>{
     const g=gi+k, s=r.tds0, b=r.tdb0, emS=(s===9||s>=13), emB=(b===9||b>=13);
-    if(CKS.td && s>=1 && visS[g] && (emS||!dense||liveS.has(g))){
+    if(!FAST && CKS.td && s>=1 && visS[g] && (emS||!dense||liveS.has(g))){
       tsY.push(r.h+(emS?o2:o1)); tsT.push(String(s));
       tsS.push(s>=13?12.5:s===9?11.5:s>=7?midF:smallF);
       tsC.push(emS?CPAL.tdS:s>=7?CPAL.tdS8:CPAL.tdS4);
     } else { tsY.push(null); tsT.push(''); tsS.push(smallF); tsC.push('rgba(0,0,0,0)'); }
-    if(CKS.td && b>=1 && visB[g] && (emB||!dense||liveB.has(g))){
+    if(!FAST && CKS.td && b>=1 && visB[g] && (emB||!dense||liveB.has(g))){
       tbY.push(r.l-(emB?o2:o1)); tbT.push(String(b));
       tbS.push(b>=13?12.5:b===9?11.5:b>=7?midF:smallF);
       tbC.push(emB?CPAL.tdB:b>=7?CPAL.tdB8:CPAL.tdB4);
@@ -2194,7 +2305,7 @@ function ckRender(J){
 
   // 除權息 / 減資 / 分割標記
   const evX=[],evY=[],evT=[];
-  if(CKS.ev) Rw.forEach((r,k)=>{ if(r.ev){ evX.push(x[k]); evY.push(r.l-o3);
+  if(CKS.ev && !FAST) Rw.forEach((r,k)=>{ if(r.ev){ evX.push(x[k]); evY.push(r.l-o3);
     const kd={div:'除權息',reduce:'減資',split:'分割'}[r.ev[1]]||r.ev[1];
     evT.push(kd+(r.ev[5]?(' '+r.ev[5]+'元'):'')+'  參考價 '+r.ev[3]+'(因子 '+r.ev[4]+')'); } });
   tr.push({type:'scatter',mode:'markers',x:evX,y:evY,name:'除權息',showlegend:false,
@@ -2231,7 +2342,7 @@ function ckRender(J){
       const raw=Rw.map(r=>r.ix==null?null:+(b0.c*(r.ix/b0.ix)).toFixed(3));
       const vv=raw.filter(v=>v!=null);
       const vmax=Math.max(...vv), vmin=Math.min(...vv), span=vmax-vmin;
-      const pHi=Math.max(...Rw.map(r=>r.h)), pLo=Math.min(...Rw.map(r=>r.l));
+      const pHi=vHi, pLo=vLo;
       idxFit=(span<rng*0.10)||(vmin<pLo)||(vmax>pHi);
       let ys=raw;
       if(idxFit&&span>1e-9){ const pmid=(pHi+pLo)/2, mid=(vmax+vmin)/2, kk=rng*0.28/span;
@@ -2265,14 +2376,16 @@ function ckRender(J){
 
   /* ---------- 圖形分析層 ---------- */
   const xann=[], xshp=[];
-  const PIV=(CKS.tl||CKS.fib||CKS.pat)?ckZigzag(Rw):null;
+  // ZigZag/趨勢線/Fib/型態都只對「看得到的那段」才有意義 → 用 V 計算,索引加 gi0 位移回全區間
+  const PIV=(!FAST&&(CKS.tl||CKS.fib||CKS.pat))?ckZigzag(V):null;
+  const gx=k=>x[gi0+k];
 
   // CTA 觸線圈:只標年線240D,且必須「先離開、再回測」才算有意義的觸線
-  if(CKS.ma){
+  if(CKS.ma && !FAST){
     let at=0,ac=0;
-    for(let k=Math.max(1,Rw.length-14);k<Rw.length;k++){
-      at+=Math.max(Rw[k].h-Rw[k].l,Math.abs(Rw[k].h-Rw[k-1].c),Math.abs(Rw[k].l-Rw[k-1].c)); ac++; }
-    const dep=Math.max(0.04,1.5*(ac?at/ac:0)/Math.max(Rw[li].c,1e-9));
+    for(let k=Math.max(1,V.length-14);k<V.length;k++){
+      at+=Math.max(V[k].h-V[k].l,Math.abs(V[k].h-V[k-1].c),Math.abs(V[k].l-V[k-1].c)); ac++; }
+    const dep=Math.max(0.04,1.5*(ac?at/ac:0)/Math.max(lastV.c,1e-9));
     const cx=[],cy=[],csz=[],ccol=[],cln=[],ctx=[];
     let lastHit=-99, away=false;
     for(let k=1;k<Rw.length;k++){
@@ -2297,22 +2410,22 @@ function ckRender(J){
 
   // 趨勢線 / 通道(取最近兩個同型轉折連線並延伸)
   if(CKS.tl && PIV && PIV.length>=3){
-    const CH=ckChannel(Rw,PIV);
+    const CH=ckChannel(V,PIV);
     [['上軌',CH.up,'rgba(248,113,113,.55)'],['下軌',CH.dn,'rgba(74,222,128,.55)']].forEach(([nm,g,c])=>{
       if(!g) return;
-      tr.push({type:'scatter',mode:'lines',x:[x[g.x0],x[g.x1]],y:[g.y0,g.y1],name:nm,showlegend:false,
+      tr.push({type:'scatter',mode:'lines',x:[gx(g.x0),gx(g.x1)],y:[g.y0,g.y1],name:nm,showlegend:false,
         line:{color:c,width:1.3},hovertemplate:nm+' %{y:.2f}<extra></extra>',yaxis:'y'});
     });
-    tr.push({type:'scatter',mode:'markers',x:PIV.map(p=>x[p.i]),y:PIV.map(p=>p.px),
+    tr.push({type:'scatter',mode:'markers',x:PIV.map(p=>gx(p.i)),y:PIV.map(p=>p.px),
       name:'轉折',showlegend:false,marker:{size:4,color:'rgba(226,232,240,.5)'},
       text:PIV.map(p=>p.t==='H'?'波段高':'波段低'),hovertemplate:'%{text} %{y:.2f}<extra></extra>',yaxis:'y'});
   }
 
   // Fibonacci 回撤
   if(CKS.fib && PIV){
-    const FB=ckFib(Rw,PIV);
+    const FB=ckFib(V,PIV);
     if(FB) FB.levels.forEach(L=>{
-      xshp.push({type:'line',xref:'x',x0:x[FB.startI],x1:x[Rw.length-1],yref:'y',y0:L.px,y1:L.px,
+      xshp.push({type:'line',xref:'x',x0:gx(FB.startI),x1:gx(V.length-1),yref:'y',y0:L.px,y1:L.px,
         line:{color:'rgba(250,204,21,.55)',width:(L.r===0||L.r===1)?1.3:1,
               dash:(L.r===0||L.r===1)?'solid':'dot'}});
       if(!MB) xann.push({xref:'paper',x:0.055,xanchor:'right',yref:'y',y:L.px,yanchor:'middle',
@@ -2322,13 +2435,13 @@ function ckRender(J){
 
   // 古典型態
   if(CKS.pat && PIV){
-    ckPatterns(Rw,PIV).forEach(P=>{
-      xshp.push({type:'rect',xref:'x',x0:x[P.x0],x1:x[P.x1],yref:'y',
+    ckPatterns(V,PIV).forEach(P=>{
+      xshp.push({type:'rect',xref:'x',x0:gx(P.x0),x1:gx(P.x1),yref:'y',
         y0:Math.min(P.y,P.neck),y1:Math.max(P.y,P.neck),
         fillcolor:P.dir>0?'rgba(74,222,128,.07)':'rgba(248,113,113,.07)',line:{width:0},layer:'below'});
-      xshp.push({type:'line',xref:'x',x0:x[P.x0],x1:x[Rw.length-1],yref:'y',y0:P.neck,y1:P.neck,
+      xshp.push({type:'line',xref:'x',x0:gx(P.x0),x1:gx(V.length-1),yref:'y',y0:P.neck,y1:P.neck,
         line:{color:P.dir>0?'rgba(74,222,128,.6)':'rgba(248,113,113,.6)',width:1,dash:'dash'}});
-      xann.push({xref:'x',x:x[Math.round((P.x0+P.x1)/2)],yref:'y',y:P.y,
+      xann.push({xref:'x',x:gx(Math.round((P.x0+P.x1)/2)),yref:'y',y:P.y,
         yanchor:P.dir>0?'top':'bottom',showarrow:false,
         text:P.name+(P.conf?'(已破頸線)':'(未確認)'),
         font:{size:9,color:P.dir>0?'#4ade80':'#f87171'},bgcolor:CPAL.bgc});
@@ -2336,7 +2449,7 @@ function ckRender(J){
   }
 
   // 燈號(觀察用):回測未通過,標示但不建議交易
-  if(CKS.sig){
+  if(CKS.sig && !FAST){
     const bx=[],by=[],bt=[],sx=[],sy=[],stt=[];
     Rw.forEach((r,k)=>{
       if(CKSIG.BOT.hit(r)>=CKSIG.BOT.need){ bx.push(x[k]); by.push(r.l-o3);
@@ -2355,8 +2468,8 @@ function ckRender(J){
   // 右緣均線價位標籤(防疊字:最小間距 5.2% 幅度)
   const ann=[];
   if(CKS.ma){
-    const L=[['季60',Rw[li].m60,CPAL.ma1],['半年120',Rw[li].m120,CPAL.ma2],
-             ['年240',Rw[li].m240,CPAL.ma3],['動60',Rw[li].mm,CPAL.ma4lab]]
+    const L=[['季60',lastV.m60,CPAL.ma1],['半年120',lastV.m120,CPAL.ma2],
+             ['年240',lastV.m240,CPAL.ma3],['動60',lastV.mm,CPAL.ma4lab]]
              .filter(p=>p[1]!=null&&isFinite(p[1])).sort((a,b)=>a[1]-b[1]);
     let pv=-Infinity;
     L.forEach(p=>{ let y=p[1]; if(y-pv<rng*0.052) y=pv+rng*0.052; pv=y;
@@ -2366,6 +2479,7 @@ function ckRender(J){
   }
   const axc={gridcolor:CPAL.grid,zeroline:false,tickfont:{size:9,color:CPAL.mut},
              linecolor:CPAL.grid,fixedrange:true};
+  const VR=ckViewRanges(R,sl,MB,true);
   // 軌道 domain:開池軌時 5 軌,關掉時 4 軌重新分配(不留空白軌,看起來才不像壞掉)
   const D = CKS.pool ? {p:[0.46,1],v:[0.375,0.445],i:[0.25,0.36],s:[0.165,0.235],f:[0,0.15]}
                      : {p:[0.42,1],v:[0.30,0.405],i:[0.145,0.275],s:[0,0.12],f:null};
@@ -2380,8 +2494,9 @@ function ckRender(J){
            showspikes:false,
            tickmode:'array',tickvals:tickV,ticktext:tickT,
            range:[-0.5,Rw.length-0.5]},                    // 見 G.4-1:一律顯式範圍,不用 autorange
-    yaxis :{...axc,domain:D.p,side:'right',tickformat:',.5~f',showspikes:false},
-    yaxis7:{...axc,domain:D.v,side:'right',tickformat:'~s'},
+    yaxis :{...axc,domain:D.p,side:'right',tickformat:',.5~f',showspikes:false,
+            range:VR['yaxis.range']},
+    yaxis7:{...axc,domain:D.v,side:'right',tickformat:'~s',range:VR['yaxis7.range']},
     yaxis8:{...axc,domain:D.i,side:'right',range:[0,104],tickvals:[0,50,80,100]},
     yaxis9:{...axc,domain:D.s,side:'right',range:[-110,110],tickvals:[-100,-33,33,100]},
     shapes:xshp.concat([{type:'rect',xref:'paper',x0:0,x1:1,yref:'y8',y0:90,y1:104,
@@ -2407,7 +2522,7 @@ function ckRender(J){
        showarrow:false,text:poolTxt,font:{size:9.5,color:CPAL.mut}}]:[]))
   };
   if(CKS.pool){
-    lay.yaxis10={...axc,domain:D.f,side:'right',tickformat:'~s'};
+    lay.yaxis10={...axc,domain:D.f,side:'right',tickformat:'~s',range:VR['yaxis10.range']};
     lay.shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y10',y0:0,y1:0,
                      line:{color:'rgba(226,232,240,.18)',width:1}});
   }
@@ -2416,7 +2531,7 @@ function ckRender(J){
   Plotly.react(el, tr, lay, {displayModeBar:false, responsive:true, scrollZoom:false});
   el.dataset.sig=sig;
   el.style.cursor=CKS.zoom?'grab':'';
-  ckSubtitle(J,Rw[li],win); ckWinLab();
+  ckSubtitle(J,lastV,win); ckWinLab();
 }
 
 /* 全史月K(對數軸;用還原價聚合,除權息不會製造假月報酬) */
@@ -2447,10 +2562,11 @@ function ckRenderMax(J,el,MB){
 /* ================= 下三區:② 現金池累積 / ① 存量分解 / ③ 成本分佈 ================= */
 /* 駕駛艙專用的 layout/axis 基底(名稱加 ck 前綴,避免與既有 pbase() 撞名) */
 const ckpb=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',
-  font:{color:CPAL.mut,size:10},hovermode:'x unified',
+  font:{color:CPAL.mut,size:10},hovermode:'x unified',spikedistance:-1,
   hoverlabel:{bgcolor:'#12141a',bordercolor:CPAL.grid,font:{size:11,color:'#e6e9ef'}}});
+// showspikes:false —— x unified 預設會畫一條貫穿全圖的虛線跟著游標,關掉只留合併提示框
 const ckax=()=>({gridcolor:CPAL.grid,zeroline:false,tickfont:{size:9,color:CPAL.mut},
-  linecolor:CPAL.grid,fixedrange:true});
+  linecolor:CPAL.grid,fixedrange:true,showspikes:false});
 function ckWinRows(J){
   const R=ckRows(J);
   const w=CKS.win==='max'?250:CKS.win;
@@ -2699,7 +2815,7 @@ function ckSubtitle(J,r,win){
   document.getElementById('cknote').innerHTML = CK_NOTE;
 }
 
-const CK_NOTE = '<b>⓪駕駛艙</b>。開啟「🖱 滾輪縮放/拖曳」後可用滾輪<b>連續</b>縮放(10 日一路到全部 900 日,不是跳段),'+'以游標所在那根為錨、拖曳可左右平移,「↺ 復原」回到 120 日。'+'<b>年線觸線圈</b>=收盤高低區間涵蓋年線240D 的那一根(必須先離開 ≥1.5×ATR 再回測才算,冷卻 10 根);'+'同日若有 TD9/13 會放大並轉為琥珀。<b>趨勢線</b>取最近兩個同型 ZigZag 轉折連線延伸;'+'<b>Fibonacci</b> 以 ZigZag 的最高/最低轉折為端點;<b>型態</b>目前支援雙重頂底與頭肩,'+'門檻已按台股放寬(美股板的 3% 門檻在單日可走 10% 的台股會讓誤判暴增)。'
+const CK_NOTE = '<b>⓪駕駛艙</b>。開啟「🖱 滾輪縮放/拖曳」後可用滾輪<b>連續</b>縮放(10 日一路到全部 900 日,不是跳段),'+'以游標所在那根為錨、拖曳可左右平移,「↺ 復原」回到 120 日;縮放倍率依滾輪力道連續換算,觸控板也跟得上手。'+'<b>手機</b>用<b>雙指</b>縮放(單指維持頁面上下滑動,不會被圖表吃掉)。'+'拖動中會暫時改畫收盤線並降採樣以維持流暢,停手後自動補回完整 K 棒與標記。'+'<b>年線觸線圈</b>=收盤高低區間涵蓋年線240D 的那一根(必須先離開 ≥1.5×ATR 再回測才算,冷卻 10 根);'+'同日若有 TD9/13 會放大並轉為琥珀。<b>趨勢線</b>取最近兩個同型 ZigZag 轉折連線延伸;'+'<b>Fibonacci</b> 以 ZigZag 的最高/最低轉折為端點;<b>型態</b>目前支援雙重頂底與頭肩,'+'門檻已按台股放寬(美股板的 3% 門檻在單日可走 10% 的台股會讓誤判暴增)。'
  +'<b>買賣燈號(▲▼)已回測,結果是「不上線」</b>——'+'2013–2023 定門檻、2024–2026 樣本外驗證,並與「隨機抽同樣天數」的基準對照:'+'<b>抄底訊號</b>樣本內每次領先隨機基準 +1.04%,但<b>樣本外掉到 +0.27%(p=0.12,不顯著)</b>,是過度配適;'+'<b>減碼訊號</b>更直接——它的超額報酬在樣本內外<b>都是正的</b>,也就是說「高檔位+高RVPOS+爆量」在台股是'+'<b>動能延續</b>的特徵、不是反轉。台股單次來回交易成本約 0.585%,兩者都撐不過。'+'詳見 repo 的 <code>BACKTEST.md</code>。'
  +'<b>①K線</b>用<b>還原價</b>(自建除權息/減資/分割因子,錨定今天=1.0),故均線與 TD9 在除權息日不會出現假跳空;'
  +'副標顯示的收盤是<b>未還原</b>原值,對得上看盤軟體。橘色▲=除權息/減資/分割日。'
