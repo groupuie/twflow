@@ -959,7 +959,12 @@ hot = {
 payload = {
     "meta": {"last_date": LAST, "generated_at": dt.datetime.now(TPE).strftime("%Y-%m-%d %H:%M"),
              "snapshot_days": len(set(d for s in hist.values() for d in s)),
-             "tdcc_dates": tdcc_dates[-4:], "watchlist": CONFIG["watchlist"]},
+             "tdcc_dates": tdcc_dates[-4:], "watchlist": CONFIG["watchlist"],
+             # 籌碼駕駛艙分檔位址(chips 分支,force-push 單一 commit;raw 有 CORS * 與 gzip)
+             "chips_base": "https://raw.githubusercontent.com/{u}/{r}/{b}/".format(
+                 u=CONFIG.get("github", {}).get("user", "groupuie"),
+                 r=CONFIG.get("github", {}).get("repo", "twflow"),
+                 b=CONFIG.get("github", {}).get("chips_branch", "chips"))},
     "overview": overview, "sectors": sectors, "scanner": scanner, "watch": watch, "flow": flow, "hot": hot,
 }
 

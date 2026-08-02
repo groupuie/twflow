@@ -95,7 +95,26 @@ td .tag{display:inline-block;font-size:11px;color:var(--ink2);background:var(--c
 select.win{background:var(--chip);color:var(--ink);border:1px solid var(--grid);border-radius:6px;padding:3px 6px;font-size:12.5px}
 input.sym{background:var(--chip);color:var(--ink);border:1px solid var(--grid);border-radius:7px;padding:6px 10px;width:150px;font-size:13px}
 footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
+/* ---------- 個股籌碼駕駛艙 ---------- */
+.ckbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:7px 0}
+.ckbar .lb{font-size:11.5px;color:var(--muted);margin:0 2px 0 0}
+.ckbar .ck{border:1px solid var(--grid);background:var(--chip);color:var(--ink2);border-radius:7px;
+  padding:3px 10px;font-size:12px;cursor:pointer;display:inline-block;font-variant-numeric:tabular-nums}
+.ckbar .ck:hover{border-color:var(--axis)}
+.ckbar .ck.on{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:600}
+.ckbar .ck.off{opacity:.55}
+.ckbar .sep{width:1px;height:16px;background:var(--grid);margin:0 3px}
+#cockpit{height:820px}
+.ckmsg{display:flex;align-items:center;justify-content:center;height:260px;color:var(--muted);font-size:13px;gap:8px}
+.ckspin{width:14px;height:14px;border:2px solid var(--grid);border-top-color:var(--blue);
+  border-radius:50%;animation:cksp .8s linear infinite}
+@keyframes cksp{to{transform:rotate(360deg)}}
 @media (max-width:900px){.g2,.g3{grid-template-columns:1fr}.wgrid{grid-template-columns:1fr}}
+@media (max-width:680px){#cockpit{height:700px}.ckbar .ck{padding:3px 8px;font-size:11.5px}
+  /* 15 檔 chip 在直立機會吃掉 5 行版面 → 改單行橫向滑動 */
+  #ckSymBar{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  #ckSymBar::-webkit-scrollbar{display:none}
+  #ckSymBar .ck{flex:0 0 auto}}
 </style>
 </head>
 <body>
@@ -334,6 +353,15 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
   </section>
 
   <section class="tab" id="tab-watch">
+    <div class="card" id="ckCard">
+      <h3>⓪ 個股籌碼駕駛艙 <span class="badge" id="ckBadge"></span></h3>
+      <div class="sub" id="ckSub">選擇標的載入長史籌碼資料…</div>
+      <div class="ckbar" id="ckSymBar"></div>
+      <div class="ckbar" id="ckWinBar"></div>
+      <div class="ckbar" id="ckOptBar"></div>
+      <div id="cockpit"><div class="ckmsg">載入中…</div></div>
+      <div class="note" id="cknote"></div>
+    </div>
     <div class="card" id="intraSetup">
       <h3>盤中即時模式</h3>
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
@@ -1583,6 +1611,366 @@ buildScanner();
   });
 })();
 
+/* ==================================================================
+   ⓪ 個股籌碼駕駛艙(Phase 2:K線 / 均線 / TD9 / 量+當沖分層 / RVPOS+RSI / score)
+   資料走 chips 分支分檔懶載入,不 inline 進本頁。燈號(▲▼)Phase 4 回測通過才上。
+   ================================================================== */
+const CPAL={
+  up:'#4ade80', dn:'#f87171',
+  ma1:'#93c5fd', ma2:'#60a5fa', ma3:'#3b82f6', ma4:'rgba(226,232,240,.55)', ma4lab:'#cbd5e1',
+  tdS:'#fb923c', tdS8:'rgba(251,146,60,.8)', tdS4:'rgba(251,146,60,.42)',
+  tdB:'#22d3ee', tdB8:'rgba(34,211,238,.8)', tdB4:'rgba(34,211,238,.42)',
+  volHot:'#f59e0b', volUp:'rgba(74,222,128,.48)', volDn:'rgba(248,113,113,.44)',
+  volDim:'rgba(148,163,184,.24)',
+  rv:'#c084fc', rvFill:'rgba(192,132,252,.07)', rsi:'#9aa6b8', sc:'#e6e9ef',
+  ev:'#fab219', grid:'#1c2027', mut:'#8792a6', bgc:'rgba(13,13,13,.68)'
+};
+const CK_BASE = (DATA.meta.chips_base || 'https://raw.githubusercontent.com/groupuie/twflow/chips/');
+const CK_WINS = [30,60,120,250,'max'];
+const CKS = {sym:null, win:120, ma:true, td:true, ev:true, vol:'net', ind:'rv', idx:false};
+const CKD = {};              // {sid: json | 'loading' | 'err'}
+const MBq = () => window.innerWidth < 680;
+
+const ckEl = () => document.getElementById('cockpit');
+function ckMsg(html){ const el=ckEl(); if(!el) return;
+  if(window.Plotly && el.querySelector('.plot-container')) Plotly.purge(el);   // 見 G.4-4:不 purge 會卡住
+  el.dataset.sig=''; el.innerHTML='<div class="ckmsg">'+html+'</div>'; }
+
+/* 變化點編碼 [[i,v],…] → 長度 n 的陣列 */
+function ckExpand(runs,n){ const a=new Array(n); let v=1,k=0;
+  for(let i=0;i<n;i++){ while(k<runs.length && runs[k][0]===i){ v=runs[k][1]; k++; } a[i]=v; }
+  return a; }
+
+async function ckLoad(sid){
+  if(CKD[sid] && CKD[sid]!=='err') return CKD[sid]==='loading' ? null : CKD[sid];
+  CKD[sid]='loading';
+  try{
+    // raw.githubusercontent 的 max-age=300 查詢字串穿不透,?v= 只求無害;資料日更故可接受
+    const r = await fetch(CK_BASE+sid+'.json?v='+Math.floor(Date.now()/300000));
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const j = await r.json();
+    CKD[sid]=j; return j;
+  }catch(e){ CKD[sid]='err'; throw e; }
+}
+
+/* ---------- 指標計算(整段算,不切視窗;結果快取在 json 物件上) ---------- */
+const TWY = 244;                      // 台股年均交易日(實測 2013-2026);RVPOS 是百分位,年化係數只影響顯示值
+function ckRows(J){
+  if(J._rows) return J._rows;
+  const n=J.n, af=ckExpand(J.af,n), vf=J.vf?ckExpand(J.vf,n):null;
+  const O=[],H=[],L=[],C=[],V=[],VD=[];
+  for(let i=0;i<n;i++){ const f=af[i]||1, g=vf?(vf[i]||1):1;
+    O.push(J.o[i]*f); H.push(J.h[i]*f); L.push(J.l[i]*f); C.push(J.c[i]*f);
+    V.push((J.v[i]||0)*g); VD.push(J.dt.v[i]==null?null:J.dt.v[i]*g); }
+  const IX=J.idx.c;
+  const P=new Array(n+1).fill(0), PV=new Array(n+1).fill(0), PN=new Array(n+1).fill(0);
+  for(let i=0;i<n;i++){ P[i+1]=P[i]+C[i]; PV[i+1]=PV[i]+V[i];
+    PN[i+1]=PN[i]+(VD[i]==null?V[i]:Math.max(0,V[i]-VD[i])); }
+
+  // ① 20 日實現波動(年化 %)
+  const rv=new Array(n).fill(null);
+  for(let i=20;i<n;i++){ const rr=[];
+    for(let j=i-19;j<=i;j++) if(C[j-1]>0) rr.push(Math.log(C[j]/C[j-1]));
+    if(rr.length<2) continue;
+    const m=rr.reduce((a,b)=>a+b,0)/rr.length;
+    rv[i]=Math.sqrt(rr.reduce((a,x)=>a+(x-m)*(x-m),0)/(rr.length-1))*Math.sqrt(TWY)*100; }
+  // ② RVPOS:504 日 rolling 百分位(含當日,min_periods 60)
+  const rvp=new Array(n).fill(null);
+  for(let i=0;i<n;i++){ if(rv[i]==null) continue; let c=0,t=0;
+    for(let j=Math.max(0,i-504);j<=i;j++) if(rv[j]!=null){ t++; if(rv[j]<=rv[i]) c++; }
+    if(t>=60) rvp[i]=Math.round(100*c/t); }
+  // ③ TD 神奇九轉 setup(收盤 vs 4 根前收盤,不封頂)
+  const tds=new Array(n).fill(0), tdb=new Array(n).fill(0);
+  for(let i=4;i<n;i++){ tds[i]=C[i]>C[i-4]?tds[i-1]+1:0; tdb[i]=C[i]<C[i-4]?tdb[i-1]+1:0; }
+  // ④ RSI(14) Wilder(標準種子:前 14 筆平均)
+  const rsi=new Array(n).fill(null); let ag=0,al=0;
+  for(let i=1;i<n;i++){ const ch=C[i]-C[i-1], g=Math.max(ch,0), l=Math.max(-ch,0);
+    if(i<=14){ ag+=g; al+=l; if(i===14){ ag/=14; al/=14; rsi[i]=100-100/(1+ag/(al||1e-9)); } }
+    else{ ag=(ag*13+g)/14; al=(al*13+l)/14; rsi[i]=100-100/(1+ag/(al||1e-9)); } }
+
+  const evm={}; (J.ev||[]).forEach(e=>{ evm[e[0]]=e; });
+  const rows=[];
+  for(let i=240;i<n;i++){
+    // 均線用台股慣例:標準 SMA 60/120/240(季線/半年線/年線),含當日
+    const s60=(P[i+1]-P[i+1-60])/60, s120=(P[i+1]-P[i+1-120])/120, s240=(P[i+1]-P[i+1-240])/240;
+    // score 六項:3 條均線 + 3 段「相對加權指數的超額動能」(台積電 30% 權重 → 絕對動能會集體同向)
+    let sc=(C[i]>s60?1:-1)+(C[i]>s120?1:-1)+(C[i]>s240?1:-1), exOk=true;
+    [60,120,240].forEach(k=>{
+      const rs=C[i]/C[i-k]-1, bi=(IX[i]&&IX[i-k])?IX[i]/IX[i-k]-1:null;
+      if(bi==null) exOk=false;
+      sc += (bi==null ? (rs>0?1:-1) : (rs>bi?1:-1));
+    });
+    const v60=(PV[i+1]-PV[i+1-60])/60, n60=(PN[i+1]-PN[i+1-60])/60;
+    const vn=(VD[i]==null?V[i]:Math.max(0,V[i]-VD[i]));
+    rows.push({i, d:String(J.d[i]), o:O[i],h:H[i],l:L[i],c:C[i], raw:J.c[i],
+      v:V[i], vd:VD[i], vn:vn,
+      volr:v60>0?V[i]/v60:1, volrn:n60>0?vn/n60:1,
+      dtp:(VD[i]!=null&&V[i]>0)?VD[i]/V[i]*100:null,
+      sc:Math.round(100*sc/6), exOk, rv:rvp[i], rvv:rv[i], rsi:rsi[i],
+      m60:s60, m120:s120, m240:s240, mm:C[i-60],
+      tds0:tds[i], tdb0:tdb[i], ev:evm[J.d[i]]||null});
+  }
+  J._rows=rows; return rows;
+}
+/* TD 段顯示判定:段最終 ≥9 或段仍進行中 → 整段可見;過去不到 9 就斷的段隱藏 */
+function ckTdVis(cn){
+  const n=cn.length, vis=new Array(n).fill(false);
+  let s=-1;
+  for(let i=0;i<n;i++){
+    if(cn[i]>0 && s<0) s=i;
+    if(cn[i]===0 || i===n-1){
+      const e=(cn[i]===0)?i-1:i;
+      if(s>=0 && (cn[e]>=9 || e===n-1)) for(let k=s;k<=e;k++) vis[k]=true;
+      s=-1;
+    }
+  }
+  return vis;
+}
+function ckLive(cn){ const S=new Set(); let i=cn.length-1;
+  if(cn[i]>0){ let c=cn[i]; while(i>=0 && cn[i]===c && c>0){ S.add(i); i--; c--; } }
+  return S; }
+
+/* ---------- UI 列 ---------- */
+function ckBuildBars(){
+  const wl = DATA.meta.watchlist||[];
+  document.getElementById('ckSymBar').innerHTML =
+    '<span class="lb">標的</span>' + wl.map(s=>
+      `<button class="ck ${s===CKS.sym?'on':''}" data-ck="sym" data-v="${s}">${s} ${nameOf(s)}</button>`).join('');
+  document.getElementById('ckWinBar').innerHTML =
+    '<span class="lb">視窗</span>' + CK_WINS.map(w=>
+      `<button class="ck ${w===CKS.win?'on':''}" data-ck="win" data-v="${w}">${w==='max'?'全史月K':w+'日'}</button>`).join('');
+  const mx = CKS.win==='max';                      // 全史月K 只有單軌,日線圖層開關無作用 → 停用
+  const dis = mx ? ' disabled style="opacity:.3;cursor:not-allowed"' : '';
+  const T=(k,on,txt)=>`<button class="ck ${on&&!mx?'on':'off'}" data-ck="t" data-v="${k}"${dis}>${txt}</button>`;
+  document.getElementById('ckOptBar').innerHTML =
+    '<span class="lb">圖層</span>'+T('ma',CKS.ma,'均線 60/120/240')+T('td',CKS.td,'TD9')+T('ev',CKS.ev,'除權息')
+    +'<span class="sep"></span><span class="lb">量</span>'
+    +`<button class="ck ${CKS.vol==='all'&&!mx?'on':''}" data-ck="vol" data-v="all"${dis}>總量</button>`
+    +`<button class="ck ${CKS.vol==='net'&&!mx?'on':''}" data-ck="vol" data-v="net"${dis}>扣當沖</button>`;
+  document.querySelectorAll('#ckSymBar .ck,#ckWinBar .ck,#ckOptBar .ck').forEach(b=>{
+    b.onclick=()=>{ const k=b.dataset.ck, v=b.dataset.v;
+      if(k==='sym'){ CKS.sym=v; }
+      else if(k==='win'){ CKS.win = v==='max'?'max':+v; }
+      else if(k==='vol'){ CKS.vol=v; }
+      else { CKS[v]=!CKS[v]; }
+      ckBuildBars(); ckShow(); };
+  });
+}
+
+/* ---------- 主渲染 ---------- */
+async function ckShow(){
+  if(!CKS.sym) CKS.sym = (DATA.meta.watchlist||['2330'])[0];
+  const sid=CKS.sym;
+  let J=CKD[sid];
+  if(!J || J==='loading' || J==='err'){
+    ckMsg('<span class="ckspin"></span>載入 '+sid+' 籌碼長史…');
+    try{ J = await ckLoad(sid); }
+    catch(e){ ckMsg('載入失敗('+e.message+')。chips 分支可能尚未產生此標的,或網路被擋。'); return; }
+    if(!J) return;
+    if(CKS.sym!==sid) return;                 // 使用者已切換標的 → 放棄這次繪製
+    ckBuildBars();
+  }
+  try{ ckRender(J); }catch(e){ ckMsg('繪製失敗:'+e.message); console.error(e); }
+}
+
+function ckRender(J){
+  const el=ckEl(), MB=MBq();
+  if(CKS.win==='max') return ckRenderMax(J,el,MB);
+  const R=ckRows(J);
+  if(!R.length){ ckMsg('歷史不足(駕駛艙需 ≥240 根日K)'); return; }
+  const win=Math.min(CKS.win, R.length), Rw=R.slice(-win), li=Rw.length-1;
+
+  /* 快取鍵:所有會改變畫面的狀態都必須在這裡,否則按了不重繪(美股板已知地雷) */
+  const sig=[J.sid,J.gen,win,Rw[li].d,Rw[li].c.toFixed(3),MB?'m':'d',
+             CKS.ma?'a1':'a0',CKS.td?'t1':'t0',CKS.ev?'e1':'e0',CKS.vol,'i'+CKS.ind].join(':');
+  if(el.dataset.sig===sig && el.querySelector('.plot-container')) return;
+
+  // ⚠ category 軸的類別值必須唯一。美股板用 'MM-DD',視窗 >1 年時日期會重複,
+  //   Plotly 會把重複類別摺疊到同一位置 → K棒錯位、均線變成水平線。改用完整日期當類別,
+  //   另外給 ticktext 顯示 MM-DD。
+  const x=Rw.map(r=>r.d.slice(0,4)+'-'+r.d.slice(4,6)+'-'+r.d.slice(6,8));
+  const nT=MB?7:14, step=Math.max(1,Math.ceil(Rw.length/nT));
+  const tickV=[],tickT=[];
+  for(let k=Rw.length-1;k>=0;k-=step){ tickV.unshift(x[k]); tickT.unshift(x[k].slice(5)); }
+  const rng=Math.max(...Rw.map(r=>r.h))-Math.min(...Rw.map(r=>r.l))||1;
+  const o1=rng*0.016, o2=rng*0.036, o3=rng*0.075;
+  const smallF=win>120?6.5:7.5, midF=win>120?8:9, dense=MB&&win>60;
+  const gi=R.length-win;                                   // Rw[k] 對應 R[gi+k]
+  const visS=ckTdVis(R.map(r=>r.tds0)), visB=ckTdVis(R.map(r=>r.tdb0));
+  const liveS=ckLive(R.map(r=>r.tds0)), liveB=ckLive(R.map(r=>r.tdb0));
+
+  const tr=[{type:'candlestick',x,open:Rw.map(r=>r.o),high:Rw.map(r=>r.h),low:Rw.map(r=>r.l),close:Rw.map(r=>r.c),
+    increasing:{line:{color:CPAL.up,width:1},fillcolor:CPAL.up},
+    decreasing:{line:{color:CPAL.dn,width:1},fillcolor:CPAL.dn},
+    name:'還原K', showlegend:false, xaxis:'x', yaxis:'y'}];
+
+  if(CKS.ma){
+    [['季線60D','m60',CPAL.ma1],['半年線120D','m120',CPAL.ma2],['年線240D','m240',CPAL.ma3],
+     ['動能60D','mm',CPAL.ma4]].forEach(([nm,k,c])=>{
+      tr.push({type:'scatter',mode:'lines',x,y:Rw.map(r=>r[k]),name:nm,showlegend:false,
+        line:{color:c,width:k==='mm'?1:1.3,dash:k==='mm'?'dot':'solid'},
+        hovertemplate:nm+' %{y:.2f}<extra></extra>',yaxis:'y'});
+    });
+  }
+
+  // TD9 數字(賣方在上/買方在下,三階字級與顏色)
+  const tsY=[],tsT=[],tsS=[],tsC=[],tbY=[],tbT=[],tbS=[],tbC=[];
+  Rw.forEach((r,k)=>{
+    const g=gi+k, s=r.tds0, b=r.tdb0, emS=(s===9||s>=13), emB=(b===9||b>=13);
+    if(CKS.td && s>=1 && visS[g] && (emS||!dense||liveS.has(g))){
+      tsY.push(r.h+(emS?o2:o1)); tsT.push(String(s));
+      tsS.push(s>=13?12.5:s===9?11.5:s>=7?midF:smallF);
+      tsC.push(emS?CPAL.tdS:s>=7?CPAL.tdS8:CPAL.tdS4);
+    } else { tsY.push(null); tsT.push(''); tsS.push(smallF); tsC.push('rgba(0,0,0,0)'); }
+    if(CKS.td && b>=1 && visB[g] && (emB||!dense||liveB.has(g))){
+      tbY.push(r.l-(emB?o2:o1)); tbT.push(String(b));
+      tbS.push(b>=13?12.5:b===9?11.5:b>=7?midF:smallF);
+      tbC.push(emB?CPAL.tdB:b>=7?CPAL.tdB8:CPAL.tdB4);
+    } else { tbY.push(null); tbT.push(''); tbS.push(smallF); tbC.push('rgba(0,0,0,0)'); }
+  });
+  tr.push({type:'scatter',mode:'text',x,y:tsY,text:tsT,textfont:{size:tsS,color:tsC},
+    showlegend:false,hoverinfo:'skip',yaxis:'y'});
+  tr.push({type:'scatter',mode:'text',x,y:tbY,text:tbT,textfont:{size:tbS,color:tbC},
+    showlegend:false,hoverinfo:'skip',yaxis:'y'});
+
+  // 除權息 / 減資 / 分割標記
+  const evX=[],evY=[],evT=[];
+  if(CKS.ev) Rw.forEach((r,k)=>{ if(r.ev){ evX.push(x[k]); evY.push(r.l-o3);
+    const kd={div:'除權息',reduce:'減資',split:'分割'}[r.ev[1]]||r.ev[1];
+    evT.push(kd+(r.ev[5]?(' '+r.ev[5]+'元'):'')+'  參考價 '+r.ev[3]+'(因子 '+r.ev[4]+')'); } });
+  tr.push({type:'scatter',mode:'markers',x:evX,y:evY,name:'除權息',showlegend:false,
+    marker:{symbol:'triangle-up',size:8,color:CPAL.ev},text:evT,
+    hovertemplate:'%{text}<extra></extra>',yaxis:'y'});
+
+  // 量:兩層疊放(暗=總量、亮=主序列),琥珀=爆量 ≥1.75×60日均
+  const prim = CKS.vol==='net' ? Rw.map(r=>r.vn) : Rw.map(r=>r.v);
+  const primR= CKS.vol==='net' ? Rw.map(r=>r.volrn) : Rw.map(r=>r.volr);
+  tr.push({type:'bar',x,y:Rw.map(r=>r.v),name:'總量',showlegend:false,
+    marker:{color:CPAL.volDim},hovertemplate:'總量 %{y:,.0f} 張<extra></extra>',yaxis:'y7'});
+  tr.push({type:'bar',x,y:prim,name:CKS.vol==='net'?'扣當沖換手':'成交量',showlegend:false,
+    marker:{color:prim.map((v,k)=>primR[k]>=1.75?CPAL.volHot:(Rw[k].c>=Rw[k].o?CPAL.volUp:CPAL.volDn))},
+    customdata:Rw.map(r=>[r.dtp==null?'—':r.dtp.toFixed(1), CKS.vol==='net'?r.volrn:r.volr]),
+    hovertemplate:(CKS.vol==='net'?'扣當沖 ':'成交 ')+'%{y:,.0f} 張<br>量比 %{customdata[1]:.2f}×<br>當沖比 %{customdata[0]}%<extra></extra>',
+    yaxis:'y7'});
+
+  // 副軌:RVPOS(轉速)+ RSI14
+  tr.push({type:'scatter',mode:'lines',x,y:Rw.map(r=>r.rv),name:'RVPOS',showlegend:false,
+    line:{color:CPAL.rv,width:2},fill:'tozeroy',fillcolor:CPAL.rvFill,
+    hovertemplate:'RVPOS %{y}<extra></extra>',yaxis:'y8'});
+  tr.push({type:'scatter',mode:'lines',x,y:Rw.map(r=>r.rsi),name:'RSI14',showlegend:false,
+    line:{color:CPAL.rsi,width:1},hovertemplate:'RSI %{y:.0f}<extra></extra>',yaxis:'y8'});
+  // 檔位 score(階梯)
+  tr.push({type:'scatter',mode:'lines',x,y:Rw.map(r=>r.sc),name:'score',showlegend:false,
+    line:{color:CPAL.sc,width:1.7,shape:'hv'},hovertemplate:'檔位 %{y}<extra></extra>',yaxis:'y9'});
+
+  // 右緣均線價位標籤(防疊字:最小間距 5.2% 幅度)
+  const ann=[];
+  if(CKS.ma){
+    const L=[['季60',Rw[li].m60,CPAL.ma1],['半年120',Rw[li].m120,CPAL.ma2],
+             ['年240',Rw[li].m240,CPAL.ma3],['動60',Rw[li].mm,CPAL.ma4lab]]
+             .filter(p=>p[1]!=null&&isFinite(p[1])).sort((a,b)=>a[1]-b[1]);
+    let pv=-Infinity;
+    L.forEach(p=>{ let y=p[1]; if(y-pv<rng*0.052) y=pv+rng*0.052; pv=y;
+      ann.push({xref:'paper',x:0.998,xanchor:'right',yref:'y',y,yanchor:'middle',showarrow:false,
+        text:p[0]+' '+(p[1]>=1000?p[1].toFixed(0):p[1].toFixed(2)),
+        font:{size:8.5,color:p[2]},bgcolor:CPAL.bgc}); });
+  }
+  const axc={gridcolor:CPAL.grid,zeroline:false,tickfont:{size:9,color:CPAL.mut},
+             linecolor:CPAL.grid,fixedrange:true};
+  const lay={
+    paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+    font:{color:CPAL.mut,size:10}, showlegend:false, barmode:'overlay', bargap:0.15,
+    margin:{l:MB?18:22,r:MB?44:62,t:22,b:26}, hovermode:'x unified',  // 軸在右側,右邊距要夠寬否則數字被截
+    hoverlabel:{bgcolor:'#12141a',bordercolor:CPAL.grid,font:{size:11,color:'#e6e9ef'}},
+    xaxis:{type:'category',...axc,rangeslider:{visible:false},anchor:'y9',
+           tickmode:'array',tickvals:tickV,ticktext:tickT,
+           range:[-0.5,Rw.length-0.5]},                    // 見 G.4-1:一律顯式範圍,不用 autorange
+    yaxis :{...axc,domain:[0.42,1],side:'right',tickformat:',.5~f'},
+    yaxis7:{...axc,domain:[0.30,0.405],side:'right',tickformat:'~s'},
+    yaxis8:{...axc,domain:[0.145,0.275],side:'right',range:[0,104],tickvals:[0,50,80,100]},
+    yaxis9:{...axc,domain:[0,0.12],side:'right',range:[-110,110],tickvals:[-100,-33,33,100]},
+    shapes:[{type:'rect',xref:'paper',x0:0,x1:1,yref:'y8',y0:90,y1:104,
+             fillcolor:'rgba(248,113,113,.10)',line:{width:0},layer:'below'},
+            {type:'line',xref:'paper',x0:0,x1:1,yref:'y8',y0:80,y1:80,
+             line:{color:'rgba(248,113,113,.4)',width:1}},
+            {type:'line',xref:'paper',x0:0,x1:1,yref:'y9',y0:0,y1:0,
+             line:{color:'rgba(226,232,240,.18)',width:1}}],
+    annotations:ann.concat([
+      {xref:'paper',yref:'paper',x:0,y:1.002,xanchor:'left',yanchor:'bottom',showarrow:false,
+       text:'① 還原K'+(CKS.ma?' + 季/半年/年線 + 動能60D':'')+(CKS.td?' + TD9':''),
+       font:{size:9.5,color:CPAL.mut}},
+      {xref:'paper',yref:'paper',x:0,y:0.408,xanchor:'left',yanchor:'bottom',showarrow:false,
+       text:'② 量(暗=總量,亮='+(CKS.vol==='net'?'扣當沖換手':'成交量')+',琥珀=爆量≥1.75×)',
+       font:{size:9.5,color:CPAL.mut}},
+      {xref:'paper',yref:'paper',x:0,y:0.278,xanchor:'left',yanchor:'bottom',showarrow:false,
+       text:'③ 轉速 RVPOS(紫,20日波動的504日百分位)+ RSI14(灰)',font:{size:9.5,color:CPAL.mut}},
+      {xref:'paper',yref:'paper',x:0,y:0.123,xanchor:'left',yanchor:'bottom',showarrow:false,
+       text:'④ 檔位 score(3均線 + 3段相對加權指數超額動能)',font:{size:9.5,color:CPAL.mut}}])
+  };
+  if(!el.querySelector('.plot-container')) el.innerHTML='';
+  Plotly.react(el, tr, lay, {displayModeBar:false, responsive:true});
+  el.dataset.sig=sig;
+  ckSubtitle(J,Rw[li],win);
+}
+
+/* 全史月K(對數軸;用還原價聚合,除權息不會製造假月報酬) */
+function ckRenderMax(J,el,MB){
+  const km=J.km||[];
+  const sig=[J.sid,J.gen,'max',MB?'m':'d'].join(':');
+  if(el.dataset.sig===sig && el.querySelector('.plot-container')) return;
+  if(km.length<24){ ckMsg('全史月K資料不足'); return; }
+  const x=km.map(m=>String(m[0]).slice(0,4)+'-'+String(m[0]).slice(4));
+  const axc={gridcolor:CPAL.grid,zeroline:false,tickfont:{size:9,color:CPAL.mut},linecolor:CPAL.grid};
+  if(!el.querySelector('.plot-container')) el.innerHTML='';
+  Plotly.react(el,[{type:'candlestick',x,open:km.map(m=>m[1]),high:km.map(m=>m[2]),
+    low:km.map(m=>m[3]),close:km.map(m=>m[4]),
+    increasing:{line:{color:CPAL.up,width:1},fillcolor:CPAL.up},
+    decreasing:{line:{color:CPAL.dn,width:1},fillcolor:CPAL.dn},showlegend:false}],
+    {paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:CPAL.mut,size:10},
+     margin:{l:MB?46:60,r:MB?10:20,t:14,b:30},showlegend:false,
+     hoverlabel:{bgcolor:'#12141a',bordercolor:CPAL.grid,font:{size:11,color:'#e6e9ef'}},
+     xaxis:{type:'category',...axc,nticks:MB?6:14,rangeslider:{visible:false},range:[-0.5,km.length-0.5]},
+     yaxis:{...axc,type:'log',side:'right'}},
+    {displayModeBar:false,responsive:true});
+  el.dataset.sig=sig;
+  document.getElementById('ckSub').innerHTML =
+    `${J.sid} ${J.name} · 全史月K(還原價)${km.length} 個月 · ${J.hist_first} 起 · 對數軸`;
+  document.getElementById('cknote').innerHTML = CK_NOTE_MAX;
+}
+
+function ckSubtitle(J,r,win){
+  const dp = r.dtp==null?'—':r.dtp.toFixed(1)+'%';
+  const gap = ((r.c/r.m240-1)*100);
+  document.getElementById('ckBadge').textContent = J.last;
+  document.getElementById('ckBadge').className = 'badge ok';
+  document.getElementById('ckSub').innerHTML =
+    `<b>${J.sid} ${J.name}</b> · 收盤 <b>${r.raw.toFixed(2)}</b>(未還原,對得上看盤軟體)/ 還原 ${r.c.toFixed(2)}`
+    + ` · 檔位 <b>${r.sc}</b>${r.exOk?'':'<span class="badge warn">超額動能缺指數對照</span>'}`
+    + ` · RVPOS ${r.rv==null?'—':r.rv} · RSI ${r.rsi==null?'—':r.rsi.toFixed(0)}`
+    + ` · 當沖比 ${dp} · 距年線 ${gap>=0?'+':''}${gap.toFixed(1)}%`
+    + ` · 視窗 ${win} 日 / 資料 ${J.n} 根(${J.first} 起,月K 回溯 ${J.hist_first})`;
+  document.getElementById('cknote').innerHTML = CK_NOTE;
+}
+
+const CK_NOTE = '<b>⓪駕駛艙</b>(Phase 2:圖表骨架,<b>買賣燈號尚未上線</b> —— 門檻必須先用台股資料回測、且贏過隨機基準才會出現)。'
+ +'<b>①K線</b>用<b>還原價</b>(自建除權息/減資/分割因子,錨定今天=1.0),故均線與 TD9 在除權息日不會出現假跳空;'
+ +'副標顯示的收盤是<b>未還原</b>原值,對得上看盤軟體。橘色▲=除權息/減資/分割日。'
+ +'<b>均線</b>採台股慣例季線60/半年線120/年線240 標準 SMA(非美股板的 CTA 觸發價口徑),虛線=60 日前收盤(動能基準)。'
+ +'<b>TD9</b>橘=賣方九轉、青=買方九轉(收盤 vs 4 根前收盤,不封頂);只顯示「最終數到 9」或「仍在進行中」的段。'
+ +'<b>②量</b>暗柱=總成交量、亮柱=主序列(可切換總量/扣當沖後真實換手),琥珀=量比 ≥1.75×60 日均。'
+ +'台股當沖佔量中位數約 21%、極端可到 80%(2021 航運),用總量看爆量會被投機量污染。'
+ +'<b>③RVPOS</b>=20 日實現波動在過去 504 日的百分位(≥80 進紅帶=波動已在高位、無餘裕),RSI14 為背景參考。'
+ +'<b>④檔位 score</b>=6 項打分:價格 vs 季/半年/年線 3 項 + <b>相對加權指數的超額動能</b> 3 項(60/120/240 日)。'
+ +'改用超額動能是因為台積電權重近 30%,個股絕對動能會被指數綁架、集體同向。'
+ +'<b>這張圖看不到誰</b>:三大法人與融資券是官方口徑,但台股的<b>主力/大戶現股</b>完全不在任何官方每日揭露內;'
+ +'本頁所有籌碼指標的定位是<b>歸因與確認</b>,不是反轉預測(本專案已驗證池流量對指數隔日近乎零預測力)。';
+const CK_NOTE_MAX = '全史月K以<b>還原價</b>聚合(除權息/減資/分割已還原),對數軸;'
+ +'月報酬不會因為配息而系統性偏低。轉速/檔位/量副軌在全史模式無對應資料已隱藏,切回 30–250 日視窗即恢復。';
+
+let _ckRz;
+window.addEventListener('resize',()=>{ clearTimeout(_ckRz);
+  _ckRz=setTimeout(()=>{ if(activeTab==='watch'){ const el=ckEl(); if(el) el.dataset.sig=''; ckShow(); } },350); });
+
 /* ---------- tabs ---------- */
 let activeTab = 'flow';
 function showTab(t){
@@ -1592,6 +1980,8 @@ function showTab(t){
   document.querySelectorAll('section.tab').forEach(s=>s.classList.toggle('active',s.id==='tab-'+t));
   renderTabCharts(t);
   if(t==='flow'){ renderRotationTW(); if(window.buildHeatmap) window.buildHeatmap(); }
+  if(t==='watch'){ ckBuildBars(); ckShow();
+    setTimeout(()=>window.dispatchEvent(new Event('resize')),50); }   // G.4-7:隱藏時 Plotly 尺寸為 0
 }
 document.querySelectorAll('nav.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 
