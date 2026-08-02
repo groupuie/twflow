@@ -437,11 +437,40 @@ def rebuild_chip_adj(conn, sid):
         log(f"    {sid} 股數事件(量需還原): {big}")
     return len(out)
 
-def chip_history_all(conn, sids=None):
+def chip_pool():
+    """駕駛艙標的池:自選股 + bt_pool.json 的流動性前 N 大 + 使用者自訂"""
+    pool = list(CONFIG["watchlist"])
+    for f in ("bt_pool.json", "repo_site/custom_symbols.json"):
+        p = os.path.join(BASE_DIR, f)
+        if not os.path.exists(p):
+            continue
+        try:
+            j = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            continue
+        pool += (j.get("universe", []) if isinstance(j, dict) else
+                 [str(x.get("sid") if isinstance(x, dict) else x) for x in j])
+    return [s for s in dict.fromkeys(pool) if SID_RE.fullmatch(str(s))]
+
+def chip_history_all(conn, sids=None, budget=None):
     """全清單長史更新。若 config 的 chip_history_start 被往前調(與 meta.chip_start_done 不符),
-    自動整段重抓一次;全部成功後才記錄新起點,失敗時下次會再試(不會半途認定已完成)。"""
+    自動整段重抓一次;全部成功後才記錄新起點,失敗時下次會再試(不會半途認定已完成)。
+
+    budget:每輪最多更新幾檔(FinMind register 是 600 次/hr,100 檔 × 7 dataset = 700 次會爆表)。
+      自選股每輪必更新,其餘依「最久沒更新」輪流,盤後每 30 分一輪 → 全池約 2 小時內輪完一次。"""
     full_list = sids is None
-    sids = sids or (list(CONFIG["watchlist"]) + [CHIP_INDEX])
+    if sids is None:
+        conn.execute("CREATE TABLE IF NOT EXISTS chip_upd(stock_id TEXT PRIMARY KEY, ts TEXT)")
+        pool = chip_pool()
+        if budget:
+            wl = set(CONFIG["watchlist"])
+            seen = {r[0]: r[1] for r in conn.execute("SELECT stock_id,ts FROM chip_upd")}
+            rest = sorted([s for s in pool if s not in wl], key=lambda s: seen.get(s, ""))
+            sids = [s for s in pool if s in wl] + rest[:max(0, budget - len(wl))]
+            full_list = False           # 只更新一部分 → 不可據此標記「起點已完成」
+        else:
+            sids = pool
+        sids = sids + [CHIP_INDEX]
     done_start = (conn.execute("SELECT value FROM meta WHERE key='chip_start_done'").fetchone() or [None])[0]
     full = done_start != CHIP_START
     if full and done_start:
@@ -453,6 +482,8 @@ def chip_history_all(conn, sids=None):
                 ok += 1
             if sid != CHIP_INDEX:
                 rebuild_chip_adj(conn, sid)
+                conn.execute("INSERT OR REPLACE INTO chip_upd VALUES(?,?)",
+                             (sid, dt.datetime.now(TPE).isoformat()))
         except Exception as e:
             log(f"  chip {sid} 整檔失敗(續下一檔): {repr(e)[:90]}")
         if i % 5 == 0:
@@ -1052,7 +1083,8 @@ def do_update():
             fetch_watch_stock(conn, sid, lookback)
         log("自選股增量完成")
         try:
-            chip_history_all(conn)      # 籌碼長史增量(每檔每表只抓 MAX(date)-7 之後)
+            # 籌碼長史增量:每輪最多 40 檔(自選 15 必更 + 25 輪替),避開 600 次/hr 的限額
+            chip_history_all(conn, budget=int(CONFIG.get("chip_update_budget", 40)))
         except Exception as e:
             log(f"籌碼長史更新異常(不影響其他): {e}")
         try:

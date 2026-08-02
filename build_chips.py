@@ -18,7 +18,7 @@
   python3 build_chips.py            # 產出 chips/ 全部自選股 + _index.json
   python3 build_chips.py 2330       # 只產一檔(除錯用)
 """
-import datetime as dt, hashlib, json, os, sqlite3, sys
+import datetime as dt, hashlib, json, math, os, sqlite3, sys
 from zoneinfo import ZoneInfo
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +28,7 @@ CONFIG = json.load(open(os.path.join(BASE, "config.json"), encoding="utf-8"))
 TPE = ZoneInfo("Asia/Taipei")
 CHIP_INDEX = "TAIEX"
 JSON_DAYS = int(CONFIG.get("chip_json_days", 900))
+TWY = 244          # 台股年均交易日(RVPOS 是百分位,年化係數只影響顯示值)
 
 conn = sqlite3.connect(DB_PATH)
 
@@ -84,6 +85,104 @@ _idx_rows = conn.execute(
 IDX = {r[0]: r for r in _idx_rows}
 
 
+def indicators(sid, dates_all, n_keep):
+    """在伺服器端用『全史』算指標,只送視窗那一段。
+
+    這樣做的兩個理由:
+    1. RVPOS 需要 504 日回看、score 需要 240 日回看。若在瀏覽器算,送過去的 900 根
+       前面 ~524 根會是 null,能顯示的視窗就被壓到 376 天;伺服器端用全史算則每一根都有效,
+       使用者可以一路縮放到 900 天。
+    2. RVPOS 是 O(n×505) 巢狀迴圈,在 JS 裡換股要跑 45 萬次,換股會明顯卡頓。
+    """
+    rows = conn.execute(
+        "SELECT p.date,p.high,p.low,p.close,p.volume,COALESCE(a.adj_f,1.0) "
+        "FROM chip_price p LEFT JOIN chip_adj a ON a.date=p.date AND a.stock_id=p.stock_id "
+        "WHERE p.stock_id=? ORDER BY p.date", (sid,)).fetchall()
+    rows = [r for r in rows if r[3] and r[3] > 0]
+    n = len(rows)
+    if n < 260:
+        return None
+    C = [r[3] * r[5] for r in rows]
+    H = [r[1] * r[5] if r[1] else C[i] for i, r in enumerate(rows)]
+    L = [r[2] * r[5] if r[2] else C[i] for i, r in enumerate(rows)]
+    d = [r[0] for r in rows]
+    idx = {r[0]: r[1] for r in conn.execute(
+        "SELECT date,close FROM chip_price WHERE stock_id=? AND close>0", (CHIP_INDEX,))}
+
+    P = [0.0] * (n + 1)
+    for i in range(n):
+        P[i + 1] = P[i] + C[i]
+
+    lg = [0.0] * n
+    for i in range(1, n):
+        lg[i] = math.log(C[i] / C[i - 1]) if C[i - 1] > 0 else 0.0
+    s1 = s2 = 0.0
+    rv = [None] * n
+    for i in range(1, n):
+        s1 += lg[i]; s2 += lg[i] * lg[i]
+        if i >= 20:
+            s1 -= lg[i - 20]; s2 -= lg[i - 20] * lg[i - 20]
+            var = (s2 - s1 * s1 / 20) / 19
+            rv[i] = math.sqrt(var) * math.sqrt(TWY) * 100 if var > 0 else 0.0
+    rvp = [None] * n
+    for i in range(n):
+        if rv[i] is None:
+            continue
+        lo = max(0, i - 504)
+        t = c = 0
+        cur = rv[i]
+        for j in range(lo, i + 1):
+            x = rv[j]
+            if x is not None:
+                t += 1
+                if x <= cur:
+                    c += 1
+        if t >= 60:
+            rvp[i] = round(100 * c / t)
+
+    tds = [0] * n; tdb = [0] * n
+    for i in range(4, n):
+        tds[i] = tds[i - 1] + 1 if C[i] > C[i - 4] else 0
+        tdb[i] = tdb[i - 1] + 1 if C[i] < C[i - 4] else 0
+
+    # RSI14(Wilder,標準種子)
+    rsi = [None] * n
+    ag = al = 0.0
+    for i in range(1, n):
+        ch = C[i] - C[i - 1]
+        g, l = max(ch, 0.0), max(-ch, 0.0)
+        if i <= 14:
+            ag += g; al += l
+            if i == 14:
+                ag /= 14; al /= 14
+                rsi[i] = 100 - 100 / (1 + ag / (al or 1e-9))
+        else:
+            ag = (ag * 13 + g) / 14; al = (al * 13 + l) / 14
+            rsi[i] = 100 - 100 / (1 + ag / (al or 1e-9))
+
+    out = {k: [] for k in ("rv", "rsi", "sc", "m60", "m120", "m240", "mm", "tds", "tdb")}
+    lo_i = max(240, n - n_keep)
+    for i in range(lo_i, n):
+        m60 = (P[i + 1] - P[i + 1 - 60]) / 60
+        m120 = (P[i + 1] - P[i + 1 - 120]) / 120
+        m240 = (P[i + 1] - P[i + 1 - 240]) / 240
+        sc = (1 if C[i] > m60 else -1) + (1 if C[i] > m120 else -1) + (1 if C[i] > m240 else -1)
+        for k in (60, 120, 240):
+            a, b = idx.get(d[i]), idx.get(d[i - k])
+            if a and b:
+                sc += 1 if (C[i] / C[i - k] - 1) > (a / b - 1) else -1
+            else:
+                sc += 1 if C[i] > C[i - k] else -1
+        out["rv"].append(rvp[i])
+        out["rsi"].append(rd(rsi[i], 1))
+        out["sc"].append(round(100 * sc / 6))
+        out["m60"].append(rd(m60)); out["m120"].append(rd(m120))
+        out["m240"].append(rd(m240)); out["mm"].append(rd(C[i - 60]))
+        out["tds"].append(tds[i]); out["tdb"].append(tdb[i])
+    out["_from"] = d[lo_i]
+    return out
+
+
 def monthly(sid):
     """全史月K(供全史月K圖與季節性矩陣);用還原價,除權息不會製造假月報酬"""
     rows = conn.execute(
@@ -112,7 +211,12 @@ def build_one(sid, name):
         return None
     # 日線只送最近 JSON_DAYS 根:250日視窗 + RVPOS 的 504 日百分位回看 + 252 日動能 ⇒ ~780 根就夠,
     # 取 900 留餘裕。更長的歷史(全史月K、季節性)走月K聚合,不必把日線全丟給瀏覽器。
-    dates = dates_all[-JSON_DAYS:]
+    IND = indicators(sid, dates_all, JSON_DAYS)
+    if not IND:
+        print(f"  {sid} 歷史不足 260 根,略過")
+        return None
+    # 指標從 max(240, n-JSON_DAYS) 起算,日線視窗必須跟它對齊,否則會錯位
+    dates = dates_all[dates_all.index(IND["_from"]):]
     km = monthly(sid)
 
     px = series("chip_price", "open,high,low,close,volume,amount", sid, dates)
@@ -163,6 +267,9 @@ def build_one(sid, name):
         "msb": col(sb, 1, 1e-3, 1),                                # 券商借券(融券)餘額 張
         "dt": {"v": col(dtr, 0, 1e-3, 1),                          # 當沖量 股 → 張
                "b": col(dtr, 1, 1e-6, 1), "s": col(dtr, 2, 1e-6, 1)},   # 當沖買/賣金額 百萬元
+        # 指標由伺服器端用全史算好(RVPOS 需 504 日回看、score 需 240 日回看)。
+        # 在瀏覽器算的話前 ~524 根會是 null、可視窗口被壓到 376 天,而且 O(n×505) 換股會卡。
+        "ind": {k: IND[k] for k in ("rv", "rsi", "sc", "m60", "m120", "m240", "mm", "tds", "tdb")},
         "ev": ev,
         # 視窗起點「之前」的累積買賣超(張)。存量分解要推估投信持股時,只有視窗內 900 天會嚴重低估;
         # 有這個基數才能從 chip_history_start 起算。仍是推估:不含起算日之前的既有部位。
@@ -195,11 +302,30 @@ def build_one(sid, name):
     return out
 
 
+def chip_pool():
+    """駕駛艙可選標的:自選股 + 流動性前 N 大 + 使用者自訂,依此順序去重。
+    只納入 chip_price 真的有資料的,避免產出空檔讓前端一直轉圈。"""
+    pool = list(CONFIG["watchlist"])
+    for f in ("bt_pool.json", "repo_site/custom_symbols.json"):
+        p = os.path.join(BASE, f)
+        if not os.path.exists(p):
+            continue
+        try:
+            j = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            continue
+        pool += (j.get("universe", []) if isinstance(j, dict) else
+                 [str(x.get("sid") if isinstance(x, dict) else x) for x in j])
+    have = {r[0] for r in conn.execute(
+        "SELECT stock_id FROM chip_price GROUP BY stock_id HAVING COUNT(*)>=260")}
+    return [s for s in dict.fromkeys(pool) if s in have and s != CHIP_INDEX]
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     names = {r[0]: r[1] for r in conn.execute("SELECT stock_id,name FROM stock_info")}
     only = sys.argv[1] if len(sys.argv) > 1 else None
-    wl = [only] if only else list(CONFIG["watchlist"])
+    wl = [only] if only else chip_pool()
     index, total, fph = [], 0, hashlib.sha1()
     for sid in wl:
         o = build_one(sid, names.get(sid, sid))
