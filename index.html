@@ -1656,11 +1656,22 @@ const CPAL={
 };
 const CK_BASE = (DATA.meta.chips_base || 'https://raw.githubusercontent.com/groupuie/twflow/chips/');
 const CK_WINS = [30,60,120,250,'max'];
-const CKS = {sym:null, win:120, ma:true, td:true, ev:true, vol:'net', ind:'rv',
-             idx:false,                                  // 主圖疊加加權指數(形狀對照)
-             pool:true,                                  // ⑤ 籌碼池累積軌
-             fidx:'idx',                                 // 池圖疊加:'none' | 'px' | 'idx' | 'both'
-             flow:{f:true,t:true,d:true,m:true,s:true}};  // 池圖 5 軌開關
+const CKS = {sym:null,
+             win:120,        // 視窗天數:**連續值**(滾輪縮放),不是離散按鈕
+             off:0,          // 右緣往回位移幾根(0 = 最新),拖曳平移用
+             zoom:false,     // 滾輪縮放/拖曳模式
+             ma:true, td:true, ev:true, vol:'net', ind:'rv',
+             idx:false,      // 主圖疊加加權指數(形狀對照)
+             pool:true,      // ⑤ 籌碼池累積軌
+             tl:false,       // 趨勢線 / 通道
+             fib:false,      // Fibonacci 回撤
+             pat:false,      // 古典型態
+             sig:false,      // 燈號標注(觀察用,回測未通過)
+             fidx:'idx',     // 池圖疊加:'none' | 'px' | 'idx' | 'both'
+             flow:{f:true,t:true,d:true,m:true,s:true}};
+const CK_DEF = {win:120, off:0};                  // 復原用
+const CK_ZSTEP = 1.14;                            // 每格滾輪的縮放倍率(連續)
+const CK_WMIN = 10;                               // 最小視窗(天)
 const CPOOL={f:'#3987e5',t:'#c98500',d:'#9085e9',m:'#22d3ee',s:'#f472b6',
              inst:'#fab219',cred:'#c2703e',all:'#e6e9ef',px:'rgba(226,232,240,.75)',idx:'#2dd4bf'};
 const FLOWDEF=[['f','外資',CPOOL.f],['t','投信',CPOOL.t],['d','自營商',CPOOL.d],
@@ -1694,6 +1705,7 @@ async function ckLoad(sid){
 const TWY = 244;                      // 台股年均交易日(實測 2013-2026);RVPOS 是百分位,年化係數只影響顯示值
 function ckRows(J){
   if(J._rows) return J._rows;
+  if(J.ind) return ckRowsFast(J);        // 伺服器端已用全史算好指標 → 直接組裝,省下 O(n×505)
   const n=J.n, af=ckExpand(J.af,n), vf=J.vf?ckExpand(J.vf,n):null;
   const O=[],H=[],L=[],C=[],V=[],VD=[];
   for(let i=0;i<n;i++){ const f=af[i]||1, g=vf?(vf[i]||1):1;
@@ -1774,6 +1786,164 @@ function ckRows(J){
   }
   J._rows=rows; return rows;
 }
+/* 伺服器端已算好指標時的快速組裝路徑(ind 各序列與 d/o/h/l/c 同長) */
+function ckRowsFast(J){
+  const n=J.n, af=ckExpand(J.af,n), vf=J.vf?ckExpand(J.vf,n):null, I=J.ind, IX=J.idx.c;
+  const F5=ckFlows(J,vf);
+  const evm={}; (J.ev||[]).forEach(e=>{ evm[e[0]]=e; });
+  const PV=[], PN=[];
+  let av=0, an=0;
+  for(let i=0;i<n;i++){
+    const g=vf?(vf[i]||1):1, v=(J.v[i]||0)*g;
+    const dtv=J.dt.v[i]==null?null:J.dt.v[i]*g;
+    const vn=(dtv==null?v:Math.max(0,v-dtv));
+    av+=v; an+=vn;
+    if(i>=60){ av-=(J.v[i-60]||0)*(vf?(vf[i-60]||1):1);
+      const p=J.dt.v[i-60]==null?null:J.dt.v[i-60]*(vf?(vf[i-60]||1):1);
+      const pv=(J.v[i-60]||0)*(vf?(vf[i-60]||1):1);
+      an-=(p==null?pv:Math.max(0,pv-p)); }
+    PV.push(av/Math.min(i+1,60)); PN.push(an/Math.min(i+1,60));
+  }
+  const rows=[];
+  for(let i=0;i<n;i++){
+    const f=af[i]||1, g=vf?(vf[i]||1):1;
+    const v=(J.v[i]||0)*g, dtv=J.dt.v[i]==null?null:J.dt.v[i]*g;
+    const vn=(dtv==null?v:Math.max(0,v-dtv));
+    rows.push({i, d:String(J.d[i]), o:J.o[i]*f, h:J.h[i]*f, l:J.l[i]*f, c:J.c[i]*f, raw:J.c[i],
+      v, vd:dtv, vn,
+      volr:PV[i]>0?v/PV[i]:1, volrn:PN[i]>0?vn/PN[i]:1,
+      dtp:(dtv!=null&&v>0)?dtv/v*100:null,
+      sc:I.sc[i], exOk:true, rv:I.rv[i], rsi:I.rsi[i],
+      m60:I.m60[i], m120:I.m120[i], m240:I.m240[i], mm:I.mm[i],
+      tds0:I.tds[i], tdb0:I.tdb[i], ev:evm[J.d[i]]||null,
+      fl:F5[i], ix:IX[i], px:J.c[i],
+      r5:(i>=5&&J.c[i-5])?(J.c[i]/J.c[i-5]-1):0,
+      lim:(i>0&&J.c[i-1])?Math.abs(J.c[i]/J.c[i-1]-1)>=0.095:false,   // 漲跌停(近)鎖死
+      mgLots:J.mg.m[i], sblLots:J.sbl[i], fhR:J.fh.r[i], fhSh:J.fh.sh[i], amt:J.am[i]});
+  }
+  J._rows=rows; return rows;
+}
+
+/* ================= 圖形分析層:ZigZag → 趨勢線 / Fibonacci / 古典型態 ================= */
+function ckZigzag(R){
+  const n=R.length; if(n<20) return [];
+  let s=0,c=0;
+  for(let i=Math.max(1,n-15);i<n;i++){
+    s+=Math.max(R[i].h-R[i].l, Math.abs(R[i].h-R[i-1].c), Math.abs(R[i].l-R[i-1].c)); c++; }
+  // 美股板用 dev=clamp(1.5×ATR14/px, 3%, 8%)。台股單日上限 ±10%,3% 下限會產生過多假轉折 → 提到 4%
+  const dev=Math.min(0.14, Math.max(0.04, 1.5*(c?s/c:0)/Math.max(R[n-1].c,1e-9)));
+  const piv=[];
+  let hi=R[0].h, hii=0, lo=R[0].l, loi=0, dir=0;
+  for(let i=1;i<n;i++){
+    const r=R[i];
+    if(r.h>hi){ hi=r.h; hii=i; }
+    if(r.l<lo){ lo=r.l; loi=i; }
+    if(dir!==-1 && r.l<=hi*(1-dev)){ piv.push({i:hii,px:hi,t:'H'}); dir=-1; lo=r.l; loi=i; }
+    else if(dir!==1 && r.h>=lo*(1+dev)){ piv.push({i:loi,px:lo,t:'L'}); dir=1; hi=r.h; hii=i; }
+  }
+  if(dir===1) piv.push({i:hii,px:hi,t:'H',tent:true});
+  else if(dir===-1) piv.push({i:loi,px:lo,t:'L',tent:true});
+  return piv.filter((p,k)=>k===0||p.i>piv[k-1].i);
+}
+/* 通道:最近兩個同型轉折連線並延伸到右緣 */
+function ckChannel(R,piv){
+  const n=R.length, seg=t=>{ const P=piv.filter(p=>p.t===t).slice(-2);
+    if(P.length<2||P[1].i===P[0].i) return null;
+    const k=(P[1].px-P[0].px)/(P[1].i-P[0].i);
+    return {x0:P[0].i, y0:P[0].px, x1:n-1, y1:P[1].px+k*(n-1-P[1].i), k};
+  };
+  return {up:seg('H'), dn:seg('L')};
+}
+function ckFib(R,piv){
+  const n=R.length; if(n<20) return null;
+  let hi=null,lo=null;
+  piv.forEach(p=>{ if(p.t==='H'&&(!hi||p.px>hi.px))hi=p; if(p.t==='L'&&(!lo||p.px<lo.px))lo=p; });
+  if(!hi||!lo){ let ih=0,il=0;
+    for(let i=0;i<n;i++){ if(R[i].h>R[ih].h)ih=i; if(R[i].l<R[il].l)il=i; }
+    hi={i:ih,px:R[ih].h}; lo={i:il,px:R[il].l}; }
+  const span=hi.px-lo.px; if(!(span>0)) return null;
+  const down=hi.i<lo.i;
+  return {hi,lo,down,startI:Math.min(hi.i,lo.i),
+    levels:[0,0.236,0.382,0.5,0.618,0.786,1].map(r=>({r,
+      px:+(down?(hi.px-span*r):(lo.px+span*r)).toFixed(3),
+      lab:(r===0?'0':(r===1?'100':(r*100).toFixed(1)))+'%'}))};
+}
+/* 古典型態:雙頂/雙底 + 頭肩頂/逆頭肩。
+   門檻按台股放寬(美股板 HEAD_MIN=3%、DT_TOL=3% 是以美股波動校準,
+   台股單日就能走 10%,3% 會讓誤判暴增)。 */
+function ckPatterns(R,piv){
+  const out=[], n=R.length, DT=0.045, HEAD=0.05, SH=0.20;
+  const P=piv.filter(p=>!p.tent);
+  const close=R[n-1].c;
+  for(let k=P.length-1;k>=2;k--){
+    const a=P[k-2], m=P[k-1], b=P[k];
+    if(!(a.t===b.t && m.t!==a.t)) continue;
+    if(n-1-b.i>60) break;
+    const dif=Math.abs(a.px-b.px)/Math.max(a.px,b.px);
+    if(dif>DT) continue;
+    const retr=Math.abs(m.px-(a.px+b.px)/2)/Math.max(a.px,b.px);
+    if(retr<0.05) continue;
+    const top=(a.t==='H');
+    out.push({name:top?'雙重頂':'雙重底', dir:top?-1:1, x0:a.i, x1:b.i,
+      y:(a.px+b.px)/2, neck:m.px,
+      conf:top?(close<m.px):(close>m.px)});
+    break;
+  }
+  for(let k=P.length-1;k>=4;k--){
+    const [ls,t1,hd,t2,rs]=[P[k-4],P[k-3],P[k-2],P[k-1],P[k]];
+    if(!(ls.t===hd.t && hd.t===rs.t && t1.t!==hd.t && t2.t!==hd.t)) continue;
+    if(n-1-rs.i>60) break;
+    const top=(hd.t==='H');
+    const okHead=top ? (hd.px>ls.px*(1+HEAD) && hd.px>rs.px*(1+HEAD))
+                     : (hd.px<ls.px*(1-HEAD) && hd.px<rs.px*(1-HEAD));
+    if(!okHead) continue;
+    if(Math.abs(ls.px-rs.px)/Math.max(ls.px,rs.px)>SH) continue;
+    const neck=(t1.px+t2.px)/2;
+    out.push({name:top?'頭肩頂':'逆頭肩', dir:top?-1:1, x0:ls.i, x1:rs.i, y:hd.px, neck,
+      conf:top?(close<neck):(close>neck)});
+    break;
+  }
+  return out;
+}
+/* 燈號(觀察用):用回測選出的最佳門檻,但兩者樣本外都沒通過 → 只標示、不建議交易 */
+const CKSIG={
+  BOT:{need:2, rv:90, sc:-33, vt:0.85, h:20,
+       hit:r=>((r.tdb0>=9)+((r.rv!=null&&r.rv>=90))+((r.volrn<=0.85&&r.r5<=-0.05))+(r.sc<=-33))},
+  TOP:{need:3, rv:80, sc:67, vt:1.75, h:5,
+       hit:r=>((r.tds0>=9)+((r.rv!=null&&r.rv>=80))+((r.volrn>=1.75&&!r.lim))+(r.sc>=67))},
+};
+/* 籌碼池 5 軌(億元)——與慢速路徑同定義,抽出來共用 */
+function ckFlows(J,vf){
+  const n=J.n, out=[];
+  const cash=(lots,i)=>(lots==null||J.c[i]==null)?null:lots*J.c[i]/1e5;
+  const dOf=(a,i)=>{ if(i===0) return null;
+    if(vf && vf[i]!==vf[i-1]) return null;           // 股數事件當日,差分不是真的買賣
+    return (a[i]==null||a[i-1]==null)?null:a[i]-a[i-1]; };
+  for(let i=0;i<n;i++){
+    const f=cash((J.inst.f[i]==null&&J.inst.fd[i]==null)?null:((J.inst.f[i]||0)+(J.inst.fd[i]||0)),i);
+    const t=cash(J.inst.t[i],i);
+    const dl=cash((J.inst.ds[i]==null&&J.inst.dh[i]==null)?null:((J.inst.ds[i]||0)+(J.inst.dh[i]||0)),i);
+    const o={f,t,d:dl,m:cash(dOf(J.mg.m,i),i)};
+    const sb=cash(dOf(J.sbl,i),i);
+    o.s=(sb==null?null:-sb);                          // 借券:餘額增加 = 賣壓 = 負流
+    o.inst=(f||0)+(t||0)+(dl||0);
+    o.cred=(o.m||0)+(o.s||0);
+    o.all=o.inst+o.cred;
+    out.push(o);
+  }
+  return out;
+}
+
+/* 連續視窗切片:win 為浮點天數、off 為右緣往回位移 */
+function ckSlice(R){
+  const n=R.length;
+  let w=Math.max(CK_WMIN, Math.min(Math.round(CKS.win), n));
+  let off=Math.max(0, Math.min(Math.round(CKS.off), n-w));
+  CKS.win=w; CKS.off=off;
+  const e=n-off, st=Math.max(0,e-w);
+  return {rows:R.slice(st,e), s:st, e};
+}
+
 /* TD 段顯示判定:段最終 ≥9 或段仍進行中 → 整段可見;過去不到 9 就斷的段隱藏 */
 function ckTdVis(cn){
   const n=cn.length, vis=new Array(n).fill(false);
@@ -1793,24 +1963,65 @@ function ckLive(cn){ const S=new Set(); let i=cn.length-1;
   return S; }
 
 /* ---------- UI 列 ---------- */
+/* 標的清單:直接讀 chips 分支的 _index.json,永遠與「實際有資料的檔案」同步 */
+let CKIDX=null, CKIDX_req=0;
+async function ckIndex(){
+  if(CKIDX) return CKIDX;
+  if(Date.now()-CKIDX_req < 5000) return null;
+  CKIDX_req=Date.now();
+  try{
+    const r=await fetch(CK_BASE+'_index.json?v='+Math.floor(Date.now()/300000));
+    CKIDX=((await r.json()).items||[]).map(x=>({sid:x.sid,name:x.name||x.sid}));
+  }catch(e){
+    CKIDX=(DATA.meta.watchlist||[]).map(s=>({sid:s,name:nameOf(s)}));   // 退回自選股
+  }
+  return CKIDX;
+}
+function ckFilter(q){
+  const L=CKIDX||[]; q=(q||'').trim().toLowerCase();
+  return q ? L.filter(x=>x.sid.toLowerCase().includes(q)||(x.name||'').toLowerCase().includes(q)) : L;
+}
 function ckBuildBars(){
   const wl = DATA.meta.watchlist||[];
+  const L  = CKIDX||[];
+  const q  = (document.getElementById('ckSearch')||{}).value||'';
+  const hit= ckFilter(q);
+  const inList = L.some(x=>x.sid===CKS.sym);
+  // 搜尋框 + 下拉選單 + 自選股快捷鍵
   document.getElementById('ckSymBar').innerHTML =
-    '<span class="lb">標的</span>' + wl.map(s=>
-      `<button class="ck ${s===CKS.sym?'on':''}" data-ck="sym" data-v="${s}">${s} ${nameOf(s)}</button>`).join('');
-  document.getElementById('ckWinBar').innerHTML =
-    '<span class="lb">視窗</span>' + CK_WINS.map(w=>
-      `<button class="ck ${w===CKS.win?'on':''}" data-ck="win" data-v="${w}">${w==='max'?'全史月K':w+'日'}</button>`).join('');
-  const mx = CKS.win==='max';                      // 全史月K 只有單軌,日線圖層開關無作用 → 停用
+    '<span class="lb">標的</span>'
+    + `<input id="ckSearch" class="sym" style="width:170px" placeholder="搜尋代號或名稱…" value="${q.replace(/"/g,'&quot;')}">`
+    + `<select id="ckSel" class="win" style="max-width:230px">`
+    +   (hit.length ? hit.map(x=>`<option value="${x.sid}" ${x.sid===CKS.sym?'selected':''}>${x.sid} ${x.name}</option>`).join('')
+                    : '<option value="">查無符合</option>')
+    + `</select>`
+    + `<span class="small">${hit.length}/${L.length} 檔</span>`
+    + (/^\d{4,6}[A-Z]?$/.test(q.trim()) && !L.some(x=>x.sid===q.trim())
+        ? `<button class="ck" id="ckAdd" data-v="${q.trim()}">＋ 加入 ${q.trim()}</button>` : '')
+    + '<span class="sep"></span>'
+    + wl.slice(0,6).map(sx=>`<button class="ck ${sx===CKS.sym?'on':''}" data-ck="sym" data-v="${sx}">${sx}</button>`).join('');
+
+  const mx = CKS.win==='max';
   const dis = mx ? ' disabled style="opacity:.3;cursor:not-allowed"' : '';
+  document.getElementById('ckWinBar').innerHTML =
+    '<span class="lb">視窗</span>'
+    + [10,30,60,120,250,400,900].map(w=>
+        `<button class="ck ${(!mx&&Math.abs(CKS.win-w)<1)?'on':''}" data-ck="win" data-v="${w}">${w}日</button>`).join('')
+    + `<button class="ck ${mx?'on':''}" data-ck="win" data-v="max">全史月K</button>`
+    + '<span class="sep"></span>'
+    + `<button class="ck ${CKS.zoom?'on':'off'}" data-ck="t" data-v="zoom"${dis}>🖱 滾輪縮放/拖曳</button>`
+    + `<button class="ck" data-ck="reset"${dis}>↺ 復原</button>`
+    + `<span class="small" id="ckWinLab"></span>`;
+
   const T=(k,on,txt)=>`<button class="ck ${on&&!mx?'on':'off'}" data-ck="t" data-v="${k}"${dis}>${txt}</button>`;
   document.getElementById('ckOptBar').innerHTML =
     '<span class="lb">圖層</span>'+T('ma',CKS.ma,'均線 60/120/240')+T('td',CKS.td,'TD9')+T('ev',CKS.ev,'除權息')
-    +T('idx',CKS.idx,'加權指數')+T('pool',CKS.pool,'⑤籌碼池')
+    +T('idx',CKS.idx,'加權指數')+T('tl',CKS.tl,'趨勢線')+T('fib',CKS.fib,'Fibonacci')
+    +T('pat',CKS.pat,'型態')+T('sig',CKS.sig,'燈號(觀察用)')+T('pool',CKS.pool,'⑤籌碼池')
     +'<span class="sep"></span><span class="lb">量</span>'
     +`<button class="ck ${CKS.vol==='all'&&!mx?'on':''}" data-ck="vol" data-v="all"${dis}>總量</button>`
     +`<button class="ck ${CKS.vol==='net'&&!mx?'on':''}" data-ck="vol" data-v="net"${dis}>扣當沖</button>`;
-  // 池圖專屬列(與駕駛艙的圖層開關隔離)
+
   const fb=document.getElementById('cfBar');
   if(fb) fb.innerHTML='<span class="lb">池軌</span>'
     + FLOWDEF.map(([k,nm,c])=>`<button class="ck ${CKS.flow[k]?'on':'off'}" data-cf="flow" data-v="${k}"
@@ -1818,10 +2029,23 @@ function ckBuildBars(){
     + '<span class="sep"></span><span class="lb">疊加</span>'
     + [['none','無'],['px','股價%'],['idx','加權指數%'],['both','兩者']].map(([v,nm])=>
         `<button class="ck ${CKS.fidx===v?'on':''}" data-cf="fidx" data-v="${v}">${nm}</button>`).join('');
+
+  const sel=document.getElementById('ckSel');
+  if(sel) sel.onchange=()=>{ if(sel.value){ CKS.sym=sel.value; CKS.off=0; ckBuildBars(); ckShow(); } };
+  const se=document.getElementById('ckSearch');
+  if(se){ se.oninput=()=>{ const v=se.value, p=se.selectionStart; ckBuildBars();
+      const n=document.getElementById('ckSearch'); if(n){ n.value=v; n.focus(); n.setSelectionRange(p,p); } };
+    se.onkeydown=e=>{ if(e.key==='Enter'){ const h=ckFilter(se.value);
+      if(h.length){ CKS.sym=h[0].sid; CKS.off=0; ckBuildBars(); ckShow(); } } }; }
+  const add=document.getElementById('ckAdd');
+  if(add) add.onclick=()=>ckAddSym(add.dataset.v);
+
   document.querySelectorAll('#ckSymBar .ck,#ckWinBar .ck,#ckOptBar .ck').forEach(b=>{
-    b.onclick=()=>{ if(b.disabled) return; const k=b.dataset.ck, v=b.dataset.v;
-      if(k==='sym'){ CKS.sym=v; }
-      else if(k==='win'){ CKS.win = v==='max'?'max':+v; }
+    b.onclick=()=>{ if(b.disabled||b.id==='ckAdd') return;
+      const k=b.dataset.ck, v=b.dataset.v;
+      if(k==='sym'){ CKS.sym=v; CKS.off=0; }
+      else if(k==='win'){ CKS.win = v==='max'?'max':+v; CKS.off=0; }
+      else if(k==='reset'){ CKS.win=CK_DEF.win; CKS.off=CK_DEF.off; }
       else if(k==='vol'){ CKS.vol=v; }
       else { CKS[v]=!CKS[v]; }
       ckBuildBars(); ckShow(); };
@@ -1833,8 +2057,19 @@ function ckBuildBars(){
   });
 }
 
+/* 自訂標的:寫進既有的 CUSTOM 清單(有 gist/repo 設定就同步,否則存瀏覽器)。
+   後端下一輪會把它納入 chips 產出 → 在那之前先誠實說「還沒有資料」。 */
+async function ckAddSym(sid){
+  try{
+    if(!CUSTOM.some(x=>(x.sid||x)===sid)){ CUSTOM.push({sid, name:sid}); await saveCustom(CUSTOM); }
+    ckMsg(`已把 <b>${sid}</b> 加入自訂追蹤。籌碼長史需要後端抓取,`
+      +`約在下一輪盤後更新(每 30 分)後出現在清單中;屆時重新整理此頁即可選取。`);
+  }catch(e){ ckMsg('加入失敗:'+e.message); }
+}
+
 /* ---------- 主渲染 ---------- */
 async function ckShow(){
+  if(!CKIDX){ const L=await ckIndex(); if(L) ckBuildBars(); }
   if(!CKS.sym) CKS.sym = (DATA.meta.watchlist||['2330'])[0];
   const sid=CKS.sym;
   let J=CKD[sid];
@@ -1848,6 +2083,51 @@ async function ckShow(){
   }
   try{ ckRender(J); }catch(e){ ckMsg('繪製失敗:'+e.message); console.error(e); }
   ckLower(J);
+  ckBindZoom();
+}
+
+/* ---------- 滾輪連續縮放 + 拖曳平移 ----------
+   不用 Plotly 內建 scrollZoom:多子圖 + category 主軸下它「拖曳有效、滾輪無效」(美股板原始碼實測),
+   改成自己在 capture 階段攔 wheel。縮放以游標所在的那一根為錨,所以放大時盯著的位置不會跑掉。 */
+let _ckZT=null;
+function ckBindZoom(){
+  const el=ckEl(); if(!el || el._ckZ) return; el._ckZ=1;
+  const redraw=()=>{ clearTimeout(_ckZT); _ckZT=setTimeout(()=>{
+    const J=CKD[CKS.sym]; if(J&&typeof J==='object'){ ckRender(J); ckLower(J); ckWinLab(); } },35); };
+  el.addEventListener('wheel', ev=>{
+    if(!CKS.zoom || CKS.win==='max') return;
+    ev.preventDefault(); ev.stopPropagation();
+    const J=CKD[CKS.sym]; if(!J||typeof J!=='object') return;
+    const R=ckRows(J), n=R.length, sl=ckSlice(R);
+    const rc=el.getBoundingClientRect();
+    const fr=Math.min(1,Math.max(0,(ev.clientX-rc.left-40)/Math.max(1,rc.width-100)));  // 游標在視窗中的相對位置
+    const anchor=sl.s+fr*sl.rows.length;                       // 錨定的全域索引
+    const w0=sl.rows.length;
+    const w1=Math.max(CK_WMIN, Math.min(n, Math.round(w0*(ev.deltaY>0?CK_ZSTEP:1/CK_ZSTEP))));
+    const st1=Math.round(anchor-fr*w1);
+    CKS.win=w1; CKS.off=Math.max(0, Math.min(n-w1, n-(st1+w1)));
+    redraw();
+  }, {passive:false, capture:true});
+
+  let drag=null;
+  el.addEventListener('pointerdown', ev=>{
+    if(!CKS.zoom || CKS.win==='max') return;
+    drag={x:ev.clientX, off:CKS.off, w:CKS.win, rc:el.getBoundingClientRect()};
+    el.setPointerCapture(ev.pointerId); el.style.cursor='grabbing';
+  });
+  el.addEventListener('pointermove', ev=>{
+    if(!drag) return;
+    const perBar=Math.max(1e-6,(drag.rc.width-100)/drag.w);
+    CKS.off=drag.off+Math.round((ev.clientX-drag.x)/perBar);   // 右拖 = 看更早的資料
+    redraw();
+  });
+  const end=()=>{ drag=null; el.style.cursor=CKS.zoom?'grab':''; };
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+}
+function ckWinLab(){
+  const e=document.getElementById('ckWinLab'); if(!e) return;
+  e.textContent = CKS.win==='max' ? '' :
+    `目前 ${CKS.win} 日${CKS.off?` · 右緣往回 ${CKS.off} 根`:''}`;
 }
 
 function ckRender(J){
@@ -1855,12 +2135,14 @@ function ckRender(J){
   if(CKS.win==='max') return ckRenderMax(J,el,MB);
   const R=ckRows(J);
   if(!R.length){ ckMsg('歷史不足(駕駛艙需 ≥240 根日K)'); return; }
-  const win=Math.min(CKS.win, R.length), Rw=R.slice(-win), li=Rw.length-1;
+  const sl=ckSlice(R), Rw=sl.rows, li=Rw.length-1, win=Rw.length;
+  if(!Rw.length){ ckMsg('視窗無資料'); return; }
 
   /* 快取鍵:所有會改變畫面的狀態都必須在這裡,否則按了不重繪(美股板已知地雷) */
-  const sig=[J.sid,J.gen,win,Rw[li].d,Rw[li].c.toFixed(3),MB?'m':'d',
+  const sig=[J.sid,J.gen,win,sl.s,Rw[li].d,Rw[li].c.toFixed(3),MB?'m':'d',
              CKS.ma?'a1':'a0',CKS.td?'t1':'t0',CKS.ev?'e1':'e0',CKS.vol,'i'+CKS.ind,
-             CKS.pool?'p1':'p0',CKS.idx?'x1':'x0'].join(':');
+             CKS.pool?'p1':'p0',CKS.idx?'x1':'x0',CKS.tl?'l1':'l0',CKS.fib?'f1':'f0',
+             CKS.pat?'q1':'q0',CKS.sig?'g1':'g0',CKS.zoom?'z1':'z0'].join(':');
   if(el.dataset.sig===sig && el.querySelector('.plot-container')) return;
 
   // ⚠ category 軸的類別值必須唯一。美股板用 'MM-DD',視窗 >1 年時日期會重複,
@@ -1981,6 +2263,95 @@ function ckRender(J){
     poolTxt='⑤ 籌碼池累積(琥珀=法人 外資+投信+自營,褐虛=信用戶 融資+借券;柱=當日合計,單位 億元)';
   }
 
+  /* ---------- 圖形分析層 ---------- */
+  const xann=[], xshp=[];
+  const PIV=(CKS.tl||CKS.fib||CKS.pat)?ckZigzag(Rw):null;
+
+  // CTA 觸線圈:只標年線240D,且必須「先離開、再回測」才算有意義的觸線
+  if(CKS.ma){
+    let at=0,ac=0;
+    for(let k=Math.max(1,Rw.length-14);k<Rw.length;k++){
+      at+=Math.max(Rw[k].h-Rw[k].l,Math.abs(Rw[k].h-Rw[k-1].c),Math.abs(Rw[k].l-Rw[k-1].c)); ac++; }
+    const dep=Math.max(0.04,1.5*(ac?at/ac:0)/Math.max(Rw[li].c,1e-9));
+    const cx=[],cy=[],csz=[],ccol=[],cln=[],ctx=[];
+    let lastHit=-99, away=false;
+    for(let k=1;k<Rw.length;k++){
+      const lv=Rw[k].m240; if(lv==null) continue;
+      if(Math.abs(Rw[k].c-lv)/lv>=dep) away=true;
+      const touch=(Rw[k].l<=lv && Rw[k].h>=lv);
+      const pv=Rw[k-1].m240;
+      const prev=(pv!=null && Rw[k-1].l<=pv && Rw[k-1].h>=pv);
+      if(!touch||prev) continue;
+      if(k-lastHit<10 || !away) continue;
+      lastHit=k; away=false;
+      const hasSig=(Rw[k].tds0===9||Rw[k].tdb0===9||Rw[k].tds0>=13||Rw[k].tdb0>=13);
+      cx.push(x[k]); cy.push(+lv.toFixed(3)); csz.push(hasSig?26:20);
+      ccol.push(hasSig?'rgba(250,204,21,.18)':'rgba(147,197,253,.14)');
+      cln.push(hasSig?'rgba(250,204,21,.75)':'rgba(147,197,253,.5)');
+      ctx.push('回測年線240D '+lv.toFixed(2)+(hasSig?' · 同日有 TD9/13':''));
+    }
+    if(cx.length) tr.push({type:'scatter',mode:'markers',x:cx,y:cy,name:'年線觸線',showlegend:false,
+      marker:{size:csz,color:ccol,line:{color:cln,width:1.5}},text:ctx,
+      hovertemplate:'%{text}<extra></extra>',yaxis:'y'});
+  }
+
+  // 趨勢線 / 通道(取最近兩個同型轉折連線並延伸)
+  if(CKS.tl && PIV && PIV.length>=3){
+    const CH=ckChannel(Rw,PIV);
+    [['上軌',CH.up,'rgba(248,113,113,.55)'],['下軌',CH.dn,'rgba(74,222,128,.55)']].forEach(([nm,g,c])=>{
+      if(!g) return;
+      tr.push({type:'scatter',mode:'lines',x:[x[g.x0],x[g.x1]],y:[g.y0,g.y1],name:nm,showlegend:false,
+        line:{color:c,width:1.3},hovertemplate:nm+' %{y:.2f}<extra></extra>',yaxis:'y'});
+    });
+    tr.push({type:'scatter',mode:'markers',x:PIV.map(p=>x[p.i]),y:PIV.map(p=>p.px),
+      name:'轉折',showlegend:false,marker:{size:4,color:'rgba(226,232,240,.5)'},
+      text:PIV.map(p=>p.t==='H'?'波段高':'波段低'),hovertemplate:'%{text} %{y:.2f}<extra></extra>',yaxis:'y'});
+  }
+
+  // Fibonacci 回撤
+  if(CKS.fib && PIV){
+    const FB=ckFib(Rw,PIV);
+    if(FB) FB.levels.forEach(L=>{
+      xshp.push({type:'line',xref:'x',x0:x[FB.startI],x1:x[Rw.length-1],yref:'y',y0:L.px,y1:L.px,
+        line:{color:'rgba(250,204,21,.55)',width:(L.r===0||L.r===1)?1.3:1,
+              dash:(L.r===0||L.r===1)?'solid':'dot'}});
+      if(!MB) xann.push({xref:'paper',x:0.055,xanchor:'right',yref:'y',y:L.px,yanchor:'middle',
+        showarrow:false,text:'fib '+L.lab,font:{size:8,color:'rgba(250,204,21,.8)'},bgcolor:CPAL.bgc});
+    });
+  }
+
+  // 古典型態
+  if(CKS.pat && PIV){
+    ckPatterns(Rw,PIV).forEach(P=>{
+      xshp.push({type:'rect',xref:'x',x0:x[P.x0],x1:x[P.x1],yref:'y',
+        y0:Math.min(P.y,P.neck),y1:Math.max(P.y,P.neck),
+        fillcolor:P.dir>0?'rgba(74,222,128,.07)':'rgba(248,113,113,.07)',line:{width:0},layer:'below'});
+      xshp.push({type:'line',xref:'x',x0:x[P.x0],x1:x[Rw.length-1],yref:'y',y0:P.neck,y1:P.neck,
+        line:{color:P.dir>0?'rgba(74,222,128,.6)':'rgba(248,113,113,.6)',width:1,dash:'dash'}});
+      xann.push({xref:'x',x:x[Math.round((P.x0+P.x1)/2)],yref:'y',y:P.y,
+        yanchor:P.dir>0?'top':'bottom',showarrow:false,
+        text:P.name+(P.conf?'(已破頸線)':'(未確認)'),
+        font:{size:9,color:P.dir>0?'#4ade80':'#f87171'},bgcolor:CPAL.bgc});
+    });
+  }
+
+  // 燈號(觀察用):回測未通過,標示但不建議交易
+  if(CKS.sig){
+    const bx=[],by=[],bt=[],sx=[],sy=[],stt=[];
+    Rw.forEach((r,k)=>{
+      if(CKSIG.BOT.hit(r)>=CKSIG.BOT.need){ bx.push(x[k]); by.push(r.l-o3);
+        bt.push('▲ 抄底候選(湊 '+CKSIG.BOT.hit(r)+'/4)· 觀察用,回測樣本外未通過'); }
+      if(CKSIG.TOP.hit(r)>=CKSIG.TOP.need){ sx.push(x[k]); sy.push(r.h+o3);
+        stt.push('▼ 減碼候選(湊 '+CKSIG.TOP.hit(r)+'/4)· 觀察用,回測顯示此組合其實偏續漲'); }
+    });
+    if(bx.length) tr.push({type:'scatter',mode:'markers',x:bx,y:by,showlegend:false,
+      marker:{symbol:'star',size:11,color:'rgba(250,204,21,.55)',line:{color:'#facc15',width:1}},
+      text:bt,hovertemplate:'%{text}<extra></extra>',yaxis:'y'});
+    if(sx.length) tr.push({type:'scatter',mode:'markers',x:sx,y:sy,showlegend:false,
+      marker:{symbol:'diamond',size:10,color:'rgba(232,121,249,.5)',line:{color:'#e879f9',width:1}},
+      text:stt,hovertemplate:'%{text}<extra></extra>',yaxis:'y'});
+  }
+
   // 右緣均線價位標籤(防疊字:最小間距 5.2% 幅度)
   const ann=[];
   if(CKS.ma){
@@ -2010,13 +2381,13 @@ function ckRender(J){
     yaxis7:{...axc,domain:D.v,side:'right',tickformat:'~s'},
     yaxis8:{...axc,domain:D.i,side:'right',range:[0,104],tickvals:[0,50,80,100]},
     yaxis9:{...axc,domain:D.s,side:'right',range:[-110,110],tickvals:[-100,-33,33,100]},
-    shapes:[{type:'rect',xref:'paper',x0:0,x1:1,yref:'y8',y0:90,y1:104,
+    shapes:xshp.concat([{type:'rect',xref:'paper',x0:0,x1:1,yref:'y8',y0:90,y1:104,
              fillcolor:'rgba(248,113,113,.10)',line:{width:0},layer:'below'},
             {type:'line',xref:'paper',x0:0,x1:1,yref:'y8',y0:80,y1:80,
              line:{color:'rgba(248,113,113,.4)',width:1}},
             {type:'line',xref:'paper',x0:0,x1:1,yref:'y9',y0:0,y1:0,
-             line:{color:'rgba(226,232,240,.18)',width:1}}],
-    annotations:ann.concat([
+             line:{color:'rgba(226,232,240,.18)',width:1}}]),
+    annotations:ann.concat(xann).concat([
       {xref:'paper',yref:'paper',x:0,y:1.002,xanchor:'left',yanchor:'bottom',showarrow:false,
        text:'① 還原K'+(CKS.ma?' + 季/半年/年線 + 動能60D':'')+(CKS.td?' + TD9':'')
             +(idxRel!=null?('   加權指數:本股'+(idxRel>=0?'強於':'弱於')+'指數 '+Math.abs(idxRel).toFixed(1)+'%'
@@ -2038,9 +2409,11 @@ function ckRender(J){
                      line:{color:'rgba(226,232,240,.18)',width:1}});
   }
   if(!el.querySelector('.plot-container')) el.innerHTML='';
-  Plotly.react(el, tr, lay, {displayModeBar:false, responsive:true});
+  lay.dragmode=false;                       // 平移由自訂 pointer 處理,不用 Plotly 的(多子圖下不穩)
+  Plotly.react(el, tr, lay, {displayModeBar:false, responsive:true, scrollZoom:false});
   el.dataset.sig=sig;
-  ckSubtitle(J,Rw[li],win);
+  el.style.cursor=CKS.zoom?'grab':'';
+  ckSubtitle(J,Rw[li],win); ckWinLab();
 }
 
 /* 全史月K(對數軸;用還原價聚合,除權息不會製造假月報酬) */
@@ -2312,7 +2685,8 @@ function ckSubtitle(J,r,win){
   document.getElementById('cknote').innerHTML = CK_NOTE;
 }
 
-const CK_NOTE = '<b>⓪駕駛艙</b>。<b>買賣燈號(▲▼)已回測,結果是「不上線」</b>——'+'2013–2023 定門檻、2024–2026 樣本外驗證,並與「隨機抽同樣天數」的基準對照:'+'<b>抄底訊號</b>樣本內每次領先隨機基準 +1.04%,但<b>樣本外掉到 +0.27%(p=0.12,不顯著)</b>,是過度配適;'+'<b>減碼訊號</b>更直接——它的超額報酬在樣本內外<b>都是正的</b>,也就是說「高檔位+高RVPOS+爆量」在台股是'+'<b>動能延續</b>的特徵、不是反轉。台股單次來回交易成本約 0.585%,兩者都撐不過。'+'詳見 repo 的 <code>BACKTEST.md</code>。'
+const CK_NOTE = '<b>⓪駕駛艙</b>。開啟「🖱 滾輪縮放/拖曳」後可用滾輪<b>連續</b>縮放(10 日一路到全部 900 日,不是跳段),'+'以游標所在那根為錨、拖曳可左右平移,「↺ 復原」回到 120 日。'+'<b>年線觸線圈</b>=收盤高低區間涵蓋年線240D 的那一根(必須先離開 ≥1.5×ATR 再回測才算,冷卻 10 根);'+'同日若有 TD9/13 會放大並轉為琥珀。<b>趨勢線</b>取最近兩個同型 ZigZag 轉折連線延伸;'+'<b>Fibonacci</b> 以 ZigZag 的最高/最低轉折為端點;<b>型態</b>目前支援雙重頂底與頭肩,'+'門檻已按台股放寬(美股板的 3% 門檻在單日可走 10% 的台股會讓誤判暴增)。'
+ +'<b>買賣燈號(▲▼)已回測,結果是「不上線」</b>——'+'2013–2023 定門檻、2024–2026 樣本外驗證,並與「隨機抽同樣天數」的基準對照:'+'<b>抄底訊號</b>樣本內每次領先隨機基準 +1.04%,但<b>樣本外掉到 +0.27%(p=0.12,不顯著)</b>,是過度配適;'+'<b>減碼訊號</b>更直接——它的超額報酬在樣本內外<b>都是正的</b>,也就是說「高檔位+高RVPOS+爆量」在台股是'+'<b>動能延續</b>的特徵、不是反轉。台股單次來回交易成本約 0.585%,兩者都撐不過。'+'詳見 repo 的 <code>BACKTEST.md</code>。'
  +'<b>①K線</b>用<b>還原價</b>(自建除權息/減資/分割因子,錨定今天=1.0),故均線與 TD9 在除權息日不會出現假跳空;'
  +'副標顯示的收盤是<b>未還原</b>原值,對得上看盤軟體。橘色▲=除權息/減資/分割日。'
  +'<b>均線</b>採台股慣例季線60/半年線120/年線240 標準 SMA(非美股板的 CTA 觸發價口徑),虛線=60 日前收盤(動能基準)。'
