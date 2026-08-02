@@ -114,6 +114,7 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
 .stkrow .bar i{display:block;height:100%;border-radius:4px}
 .stkrow .vv{width:132px;text-align:right;color:var(--ink);font-variant-numeric:tabular-nums;flex:0 0 auto}
 .stkhd{font-size:11.5px;color:var(--muted);margin:10px 0 2px;border-top:1px solid var(--grid);padding-top:8px}
+.est{color:#c084fc}
 .warn2{background:rgba(250,178,25,.10);border-left:3px solid var(--amber);
   padding:7px 10px;border-radius:0 6px 6px 0;margin:9px 0;font-size:11.5px;color:var(--ink2);line-height:1.55}
 .ckmsg{display:flex;align-items:center;justify-content:center;height:260px;color:var(--muted);font-size:13px;gap:8px}
@@ -1668,14 +1669,17 @@ const CKS = {sym:null,
              pat:false,      // 古典型態
              sig:false,      // 燈號標注(觀察用,回測未通過)
              fidx:'idx',     // 池圖疊加:'none' | 'px' | 'idx' | 'both'
-             flow:{f:true,t:true,d:true,m:true,s:true}};
+             flow:{tot:true,f:true,t:true,d:false,m:false,s:false,x:true}};
 const CK_DEF = {win:120, off:0};                  // 復原用
 const CK_ZSTEP = 1.14;                            // 每格滾輪的縮放倍率(連續)
 const CK_WMIN = 10;                               // 最小視窗(天)
 const CPOOL={f:'#3987e5',t:'#c98500',d:'#9085e9',m:'#22d3ee',s:'#f472b6',
-             inst:'#fab219',cred:'#c2703e',all:'#e6e9ef',px:'rgba(226,232,240,.75)',idx:'#2dd4bf'};
-const FLOWDEF=[['f','外資',CPOOL.f],['t','投信',CPOOL.t],['d','自營商',CPOOL.d],
-               ['m','融資戶',CPOOL.m],['s','借券賣出',CPOOL.s]];
+             inst:'#fab219',cred:'#c2703e',all:'#e6e9ef',resid:'#a3e635',
+             px:'rgba(226,232,240,.75)',idx:'#2dd4bf'};
+const FLOWDEF=[['tot','總現金池(全單估計)',CPOOL.all],
+               ['f','外資',CPOOL.f],['t','投信',CPOOL.t],['d','自營商',CPOOL.d],
+               ['m','融資戶',CPOOL.m],['s','借券賣出',CPOOL.s],
+               ['x','口徑外殘差(主力/散戶現股)',CPOOL.resid]];
 const CKD = {};              // {sid: json | 'loading' | 'err'}
 const MBq = () => window.innerWidth < 680;
 
@@ -1737,27 +1741,7 @@ function ckRows(J){
     if(i<=14){ ag+=g; al+=l; if(i===14){ ag/=14; al/=14; rsi[i]=100-100/(1+ag/(al||1e-9)); } }
     else{ ag=(ag*13+g)/14; al=(al*13+l)/14; rsi[i]=100-100/(1+ag/(al||1e-9)); } }
 
-  /* ---- 籌碼池 5 軌(億元)----
-     金額 = 買賣超/餘額變動(張) × 當日收盤(元) × 1000股 / 1e8。用「未還原收盤」因為那是當天真的付出去的錢。
-     餘額類(融資/借券)取日差分;配股/分割/減資當天股數會機械性跳動,那天的差分不是真的買賣 → 設 null。
-     借券賣出採方向口徑:餘額增加 = 賣壓 = 負流,回補 = 買壓 = 正流。 */
-  const F5=[], SUM=[];
-  const cashOf=(lots,i)=> (lots==null||J.c[i]==null) ? null : lots*J.c[i]/1e5;
-  const dOf=(arr,i)=>{ if(i===0) return null;
-    if(vf && vf[i]!==vf[i-1]) return null;                 // 股數事件當日,差分無意義
-    return (arr[i]==null||arr[i-1]==null) ? null : arr[i]-arr[i-1]; };
-  for(let i=0;i<n;i++){
-    const f=cashOf((J.inst.f[i]==null&&J.inst.fd[i]==null)?null:((J.inst.f[i]||0)+(J.inst.fd[i]||0)),i);
-    const t=cashOf(J.inst.t[i],i);
-    const dl=cashOf((J.inst.ds[i]==null&&J.inst.dh[i]==null)?null:((J.inst.ds[i]||0)+(J.inst.dh[i]||0)),i);
-    const mg=cashOf(dOf(J.mg.m,i),i);
-    const sb=cashOf(dOf(J.sbl,i),i);
-    const o={f,t,d:dl,m:mg,s:(sb==null?null:-sb)};         // 借券:增加=負流
-    o.inst=(f||0)+(t||0)+(dl||0);                          // 法人合計
-    o.cred=(o.m||0)+(o.s||0);                              // 信用戶合計(融資+借券)
-    o.all=o.inst+o.cred;
-    F5.push(o); SUM.push(o.all);
-  }
+  const F5=ckFlows(J,vf);   // 與 ckRowsFast 共用同一份定義
 
   const evm={}; (J.ev||[]).forEach(e=>{ evm[e[0]]=e; });
   const rows=[];
@@ -1926,9 +1910,21 @@ function ckFlows(J,vf){
     const o={f,t,d:dl,m:cash(dOf(J.mg.m,i),i)};
     const sb=cash(dOf(J.sbl,i),i);
     o.s=(sb==null?null:-sb);                          // 借券:餘額增加 = 賣壓 = 負流
-    o.inst=(f||0)+(t||0)+(dl||0);
-    o.cred=(o.m||0)+(o.s||0);
-    o.all=o.inst+o.cred;
+    o.inst=(f||0)+(t||0)+(dl||0);                     // 法人合計(官方揭露)
+    o.cred=(o.m||0)+(o.s||0);                         // 信用戶合計(官方揭露)
+    // 全單估計:當日「所有」現金淨進出。台股 register 拿不到逐筆內外盤,
+    // 用 OHLC 的收盤位置(CLV)推估當日成交金額中有多少是買方主動:
+    //   clv = ((C−L)−(H−C))/(H−L) ∈ [−1,+1];收在最高 = 全部算流入、收在最低 = 全部算流出。
+    // 漲跌停鎖死當日 H=L,分母為 0 → 用當日漲跌方向給 ±1(鎖死本身就是極端的單邊壓力)。
+    const H=J.h[i], L=J.l[i], C=J.c[i], AM=J.am[i];
+    let clv=null;
+    if(H!=null&&L!=null&&C!=null){
+      clv = (H>L) ? (((C-L)-(H-C))/(H-L))
+                  : (i>0&&J.c[i-1]!=null ? Math.sign(C-J.c[i-1]) : 0);
+    }
+    o.tot = (clv==null||AM==null) ? null : +(AM/100*clv).toFixed(2);   // 百萬 → 億
+    o.x   = (o.tot==null) ? null : +(o.tot-o.inst-o.cred).toFixed(2);  // 口徑外殘差
+    o.all = o.inst+o.cred;
     out.push(o);
   }
   return out;
@@ -2248,19 +2244,20 @@ function ckRender(J){
   // ⑤ 籌碼池累積:柱=當日 5 軌合計淨流,線=法人累積 / 信用戶累積(自視窗起點累加)
   let poolTxt='';
   if(CKS.pool){
-    let ai=0, ac=0;
-    const bar=[], cumI=[], cumC=[];
-    Rw.forEach(r=>{ const f=r.fl; ai+=f.inst; ac+=f.cred;
-      bar.push(+(f.all).toFixed(2)); cumI.push(+ai.toFixed(2)); cumC.push(+ac.toFixed(2)); });
-    tr.push({type:'bar',x,y:bar,name:'當日淨流',showlegend:false,
+    let at=0, ai=0;
+    const bar=[], cumT=[], cumI=[];
+    Rw.forEach(r=>{ const f=r.fl; at+=(f.tot||0); ai+=f.inst;
+      bar.push(+(f.tot||0).toFixed(2)); cumT.push(+at.toFixed(2)); cumI.push(+ai.toFixed(2)); });
+    tr.push({type:'bar',x,y:bar,name:'當日總淨流',showlegend:false,
       marker:{color:bar.map(v=>v>=0?CPAL.volUp:CPAL.volDn)},
-      hovertemplate:'當日淨流 %{y:.1f} 億<extra></extra>',yaxis:'y10'});
-    tr.push({type:'scatter',mode:'lines',x,y:cumI,name:'法人累積',showlegend:false,
-      line:{color:CPOOL.inst,width:2},hovertemplate:'法人累積 %{y:.0f} 億<extra></extra>',yaxis:'y10'});
-    tr.push({type:'scatter',mode:'lines',x,y:cumC,name:'信用戶累積',showlegend:false,
-      line:{color:CPOOL.cred,width:1.7,dash:'dot'},
-      hovertemplate:'信用戶累積 %{y:.0f} 億<extra></extra>',yaxis:'y10'});
-    poolTxt='⑤ 籌碼池累積(琥珀=法人 外資+投信+自營,褐虛=信用戶 融資+借券;柱=當日合計,單位 億元)';
+      hovertemplate:'當日總淨流 %{y:.1f} 億<extra></extra>',yaxis:'y10'});
+    tr.push({type:'scatter',mode:'lines',x,y:cumT,name:'總現金池累積',showlegend:false,
+      line:{color:CPOOL.all,width:2},
+      hovertemplate:'總現金池累積 %{y:.0f} 億<extra></extra>',yaxis:'y10'});
+    tr.push({type:'scatter',mode:'lines',x,y:cumI,name:'其中法人',showlegend:false,
+      line:{color:CPOOL.inst,width:1.5,dash:'dot'},
+      hovertemplate:'其中法人 %{y:.0f} 億<extra></extra>',yaxis:'y10'});
+    poolTxt='⑤ 現金池累積(白=全單估計總現金流,琥珀虛=其中官方法人;柱=當日總淨流,單位 億元)';
   }
 
   /* ---------- 圖形分析層 ---------- */
@@ -2372,12 +2369,15 @@ function ckRender(J){
   const lay={
     paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
     font:{color:CPAL.mut,size:10}, showlegend:false, barmode:'overlay', bargap:0.15,
-    margin:{l:MB?18:22,r:MB?44:62,t:22,b:26}, hovermode:'x unified',  // 軸在右側,右邊距要夠寬否則數字被截
+    margin:{l:MB?18:22,r:MB?44:62,t:22,b:26},
+    // hovermode 用 closest(碰到 K 棒才顯示),不用 x unified —— 後者會畫一條貫穿全圖的虛線常駐在游標處
+    hovermode:'closest', spikedistance:-1, hoverdistance:12,
     hoverlabel:{bgcolor:'#12141a',bordercolor:CPAL.grid,font:{size:11,color:'#e6e9ef'}},
     xaxis:{type:'category',...axc,rangeslider:{visible:false},anchor:CKS.pool?'y10':'y9',
+           showspikes:false,
            tickmode:'array',tickvals:tickV,ticktext:tickT,
            range:[-0.5,Rw.length-0.5]},                    // 見 G.4-1:一律顯式範圍,不用 autorange
-    yaxis :{...axc,domain:D.p,side:'right',tickformat:',.5~f'},
+    yaxis :{...axc,domain:D.p,side:'right',tickformat:',.5~f',showspikes:false},
     yaxis7:{...axc,domain:D.v,side:'right',tickformat:'~s'},
     yaxis8:{...axc,domain:D.i,side:'right',range:[0,104],tickvals:[0,50,80,100]},
     yaxis9:{...axc,domain:D.s,side:'right',range:[-110,110],tickvals:[-100,-33,33,100]},
@@ -2472,13 +2472,16 @@ function cfRender(J){
 
   const cum={}, on=FLOWDEF.filter(([k])=>CKS.flow[k]);
   on.forEach(([k])=>{ let a=0; cum[k]=Rw.map(r=>{ a+=(r.fl[k]||0); return +a.toFixed(2); }); });
-  const bar=Rw.map(r=>+on.reduce((s,[k])=>s+(r.fl[k]||0),0).toFixed(2));
+  // 柱固定畫「當日總現金淨流(全單估計)」,不是被勾選那幾軌的加總 ——
+  // 那些軌互有重疊(法人買超也是全單的一部分),加起來會重複計算
+  const bar=Rw.map(r=>+((r.fl.tot)||0).toFixed(2));
 
-  const tr=[{type:'bar',x,y:bar,name:'當日淨流',showlegend:false,
+  const tr=[{type:'bar',x,y:bar,name:'當日總淨流',showlegend:false,
     marker:{color:bar.map(v=>v>=0?CPAL.volUp:CPAL.volDn)},
-    hovertemplate:'當日合計 %{y:.1f} 億<extra></extra>',yaxis:'y'}];
+    hovertemplate:'當日總淨流 %{y:.1f} 億<extra></extra>',yaxis:'y'}];
   on.forEach(([k,nm,c])=>tr.push({type:'scatter',mode:'lines',x,y:cum[k],name:nm,showlegend:true,
-    line:{color:c,width:1.8},hovertemplate:nm+' 累積 %{y:.0f} 億<extra></extra>',yaxis:'y'}));
+    line:{color:c,width:(k==='tot')?2.4:1.6,dash:(k==='x')?'dot':'solid'},
+    hovertemplate:nm+' 累積 %{y:.0f} 億<extra></extra>',yaxis:'y'}));
 
   // 疊加線(右軸,%):股價 / 加權指數,皆以視窗起點為 0%
   const ov=[], lay2={};
@@ -2653,13 +2656,21 @@ const CFLOT={f:r=>((r.fl&&(r.fl.f!=null))? r.fl.f*1e5/(r.px||1) : null),
              t:r=>((r.fl&&(r.fl.t!=null))? r.fl.t*1e5/(r.px||1) : null),
              m:r=>((r.fl&&(r.fl.m!=null))? r.fl.m*1e5/(r.px||1) : null)};
 
-const CF_NOTE='<b>②籌碼池累積</b>=五軌官方籌碼自視窗起點累加,單位<b>億元</b>(買賣超張數 × 當日<b>未還原</b>收盤,因為那是當天真的付出去的錢)。'
- +'<b>軸向:+y=資金進場買貨、−y=了結離場</b>,設計上與股價同向。<b>借券賣出採方向口徑:餘額增加=賣壓=負流、回補=正流。</b>'
- +'融資戶=Δ融資餘額×收盤(信用散戶 proxy);配股/分割/減資當日股數會機械性跳動,那天的差分不是真的買賣,已設為無資料。'
- +'<b>判讀核心是看背離</b>:價漲但法人累積線在降=法人在派發,轉折觀察。疊加線可切股價%/加權指數%;'
- +'個股波動遠大於指數時會啟動<b>形狀對照縮放</b>(hover 仍顯示真實 %),否則指數會被壓成貼地平線。'
- +'<b>這張圖看不到誰</b>:T86 只涵蓋三大法人,台股的<b>主力/大戶現股</b>完全不在任何官方每日揭露口徑內——這是台股跟美股最大的差異。'
- +'本專案已驗證池流量對指數是<b>同日高相關、隔日近乎零預測力</b>,個股層級沒理由更好:此圖定位是<b>歸因與確認</b>,不是反轉預測。';
+const CF_NOTE='<b>②現金池累積</b>=<b>所有現金</b>的每日淨進出,自視窗起點累加,單位<b>億元</b>。'
+ +'<b>總現金池(全單估計)</b>= 當日成交金額 × 收盤位置係數 <code>((C−L)−(H−C))/(H−L)</code>:'
+ +'收在最高 → 當天成交金額全部算流入、收在最低 → 全部算流出、收在中間 → 淨額接近零。'
+ +'漲跌停鎖死當日 H=L(分母為 0),改用當日漲跌方向給 ±1(鎖死本身就是極端單邊壓力)。'
+ +'<b class="est">誠實標註:這是用日 OHLC 推估的,不是實際的內外盤主動成交</b> —— 美股板有逐筆委託流,'
+ +'台股 register 等級拿不到 tick,只能用收盤位置近似。趨勢方向可信,單日絕對金額不要當精確值。'
+ +'<b>其餘各軌是「同一池水的分解」,不是另外的池子</b>:外資/投信/自營來自 T86 官方買賣超、'
+ +'融資戶=Δ融資餘額×收盤、借券賣出採方向口徑(餘額增加=賣壓=負流);'
+ +'<b>口徑外殘差 = 總現金池 − 法人 − 信用戶</b>,那是台股<b>主力/大戶現股</b>所在的地方——'
+ +'官方每日揭露完全看不到它,這條線是能逼近它的最好方法,但仍是殘差、不是實測。'
+ +'<b>各軌互有重疊,不可相加</b>(法人買超本來就是全單的一部分),柱狀圖固定畫總淨流而不是勾選軌的加總。'
+ +'<b>軸向:+y=資金進場買貨、−y=了結離場</b>,設計上與股價同向,<b>判讀核心是看背離</b>:'
+ +'價漲但總現金池在降 = 拉高出貨的特徵。疊加線可切股價%/加權指數%;'
+ +'個股波動遠大於指數時會啟動<b>形狀對照縮放</b>(hover 仍顯示真實 %)。'
+ +'本專案已驗證池流量對指數是<b>同日高相關、隔日近乎零預測力</b>:此圖定位是<b>歸因與確認</b>,不是預測。';
 const CS_NOTE='<b>①存量分解</b>:分母=官方<b>發行股數</b>(TaiwanStockShareholding)。外資持股、融資餘額、借券賣出餘額皆為<b>官方日頻</b>;'
  +'<b>投信持股是推估</b>——用 __FROM__ 起的投信買賣超累加,<b>不含起算日之前的既有部位</b>,只能看趨勢不能當絕對值(負值已夾在 0)。'
  +'「其餘」是殘差,含主力、一般散戶、內部人、政府基金等,台股沒有任何官方每日揭露能拆開它。'
