@@ -1664,6 +1664,7 @@ const CKS = {sym:null,
              ma:true, td:true, ev:true, vol:'net', ind:'rv',
              idx:false,      // 主圖疊加加權指數(形狀對照)
              pool:true,      // ⑤ 現金池累積軌
+             vbp:true,       // 右側量價分佈(VbP)
              tl:false,       // 趨勢線 / 通道
              fib:false,      // Fibonacci 回撤
              pat:false,      // 古典型態
@@ -1964,6 +1965,48 @@ function ckViewRanges(R,sl,MB,local){
           'yaxis10.range':[pmn-ppad, pmx+ppad]};
 }
 
+/* ---------- 右側量價分佈 VbP ----------
+   照美股板 C.11/C.12:只用「收盤」落箱(與下方成本分佈把量攤到 high–low 的做法不同,
+   兩張圖的 POC 因此可能略有差異,這是原始設計,不是 bug)。
+   ⚠ 一律用 paper-x shapes 畫,**不可**用 xaxis2 overlaying —— 美股板原始碼註解明載:
+   「overlaying 軸 + 事後 restyle/relayout 會讓 Plotly 把主類別軸重判成 date,已實測毒性」。 */
+function ckVbpGeom(){ return MBq()? {x0:0.878,w:0.114} : {x0:0.855,w:0.142}; }
+function ckVbpBins(R){
+  const n=R.length; if(n<5) return null;
+  const NB=Math.max(20, Math.min(50, Math.round(n/5)));
+  let lo=Infinity, hi=-Infinity;
+  for(const r of R){ if(r.l<lo)lo=r.l; if(r.h>hi)hi=r.h; }
+  if(!(hi>lo)) return null;
+  const bs=(hi-lo)/NB, up=new Array(NB).fill(0), dn=new Array(NB).fill(0), ctr=[];
+  for(let b=0;b<NB;b++) ctr.push(+(lo+(b+0.5)*bs).toFixed(4));
+  for(const r of R){
+    const bi=Math.max(0,Math.min(NB-1,Math.floor((r.c-lo)/bs)));
+    if(r.c>=r.o) up[bi]+=(r.v||0); else dn[bi]+=(r.v||0);
+  }
+  let mx=1; for(let b=0;b<NB;b++) if(up[b]+dn[b]>mx) mx=up[b]+dn[b];
+  return {ctr,up,dn,max:mx,bw:bs};
+}
+function ckVbpShapes(vb,dom){
+  const G=ckVbpGeom(), X0=G.x0, W=G.w, out=[];
+  out.push({type:'rect',xref:'paper',yref:'paper',x0:X0-0.008,x1:X0-0.006,
+    y0:dom[0],y1:dom[1],fillcolor:'rgba(148,163,184,.28)',line:{width:0},layer:'below'});
+  let poc=0; for(let b=1;b<vb.ctr.length;b++) if(vb.up[b]+vb.dn[b]>vb.up[poc]+vb.dn[poc]) poc=b;
+  for(let b=0;b<vb.ctr.length;b++){
+    const g=W*vb.up[b]/vb.max, r=W*vb.dn[b]/vb.max;
+    if(g<=0&&r<=0) continue;
+    const y0=vb.ctr[b]-vb.bw*0.46, y1=vb.ctr[b]+vb.bw*0.46, X1=X0+W, isP=(b===poc);
+    // 柱底靠右、向左長 → 方向朝著 K 線圖
+    if(g>0) out.push({type:'rect',xref:'paper',yref:'y',x0:X1-g,x1:X1,y0,y1,
+      fillcolor:isP?'rgba(74,222,128,.62)':'rgba(74,222,128,.32)',line:{width:0},layer:'below'});
+    if(r>0) out.push({type:'rect',xref:'paper',yref:'y',x0:X1-g-r,x1:X1-g,y0,y1,
+      fillcolor:isP?'rgba(248,113,113,.58)':'rgba(248,113,113,.30)',line:{width:0},layer:'below'});
+    if(isP) out.push({type:'rect',xref:'paper',yref:'y',x0:X1-g-r,x1:X1,y0,y1,
+      fillcolor:'rgba(0,0,0,0)',line:{width:1.1,color:CPAL.volHot},layer:'below'});
+  }
+  out._poc=vb.ctr[poc];
+  return out;
+}
+
 /* 連續視窗切片:win 為浮點天數、off 為右緣往回位移 */
 function ckSlice(R){
   const n=R.length;
@@ -2046,7 +2089,8 @@ function ckBuildBars(){
   const T=(k,on,txt)=>`<button class="ck ${on&&!mx?'on':'off'}" data-ck="t" data-v="${k}"${dis}>${txt}</button>`;
   document.getElementById('ckOptBar').innerHTML =
     '<span class="lb">圖層</span>'+T('ma',CKS.ma,'均線 60/120/240')+T('td',CKS.td,'TD9')+T('ev',CKS.ev,'除權息')
-    +T('idx',CKS.idx,'加權指數')+T('tl',CKS.tl,'趨勢線')+T('fib',CKS.fib,'Fibonacci')
+    +T('idx',CKS.idx,'加權指數')+T('vbp',CKS.vbp,'VbP 量價分佈')
+    +T('tl',CKS.tl,'趨勢線')+T('fib',CKS.fib,'Fibonacci')
     +T('pat',CKS.pat,'型態')+T('sig',CKS.sig,'燈號(觀察用)')+T('pool',CKS.pool,'⑤現金池')
     +'<span class="sep"></span><span class="lb">量</span>'
     +`<button class="ck ${CKS.vol==='all'&&!mx?'on':''}" data-ck="vol" data-v="all"${dis}>總量</button>`
@@ -2242,7 +2286,7 @@ function ckRender(J){
   const sig=[J.sid,J.gen,win,sl.s,Rw[li].d,Rw[li].c.toFixed(3),MB?'m':'d',
              CKS.ma?'a1':'a0',CKS.td?'t1':'t0',CKS.ev?'e1':'e0',CKS.vol,'i'+CKS.ind,
              CKS.pool?'p1':'p0',CKS.idx?'x1':'x0',CKS.tl?'l1':'l0',CKS.fib?'f1':'f0',
-             CKS.pat?'q1':'q0',CKS.sig?'g1':'g0',CKS.zoom?'z1':'z0',
+             CKS.pat?'q1':'q0',CKS.sig?'g1':'g0',CKS.zoom?'z1':'z0',CKS.vbp?'v1':'v0',
              CKS._fast?'F':'-'].join(':');
   if(el.dataset.sig===sig && el.querySelector('.plot-container')){ ckWinLab(); return; }
 
@@ -2376,6 +2420,12 @@ function ckRender(J){
 
   /* ---------- 圖形分析層 ---------- */
   const xann=[], xshp=[];
+  // VbP:用未降採樣的可視切片算,互動中分佈才不會抖動
+  // 互動中用降採樣後的 Rw 算分佈(形狀幾乎相同、成本低很多),停手後再用完整切片重算
+  const VBP = CKS.vbp ? ckVbpBins(_FAST ? Rw : sl.rows) : null;
+  const VBG = ckVbpGeom();
+  const XW  = VBP ? (VBG.x0-0.012) : 1;            // 主圖 x 軸讓出右側空間,零重疊
+  const XR  = VBP ? (VBG.x0-0.018) : 0.998;        // 右緣均線價位標籤要跟著往左
   // ZigZag/趨勢線/Fib/型態都只對「看得到的那段」才有意義 → 用 V 計算,索引加 gi0 位移回全區間
   const PIV=(!FAST&&(CKS.tl||CKS.fib||CKS.pat))?ckZigzag(V):null;
   const gx=k=>x[gi0+k];
@@ -2473,7 +2523,7 @@ function ckRender(J){
              .filter(p=>p[1]!=null&&isFinite(p[1])).sort((a,b)=>a[1]-b[1]);
     let pv=-Infinity;
     L.forEach(p=>{ let y=p[1]; if(y-pv<rng*0.052) y=pv+rng*0.052; pv=y;
-      ann.push({xref:'paper',x:0.998,xanchor:'right',yref:'y',y,yanchor:'middle',showarrow:false,
+      ann.push({xref:'paper',x:XR,xanchor:'right',yref:'y',y,yanchor:'middle',showarrow:false,
         text:p[0]+' '+(p[1]>=1000?p[1].toFixed(0):p[1].toFixed(2)),
         font:{size:8.5,color:p[2]},bgcolor:CPAL.bgc}); });
   }
@@ -2483,6 +2533,7 @@ function ckRender(J){
   // 軌道 domain:開池軌時 5 軌,關掉時 4 軌重新分配(不留空白軌,看起來才不像壞掉)
   const D = CKS.pool ? {p:[0.46,1],v:[0.375,0.445],i:[0.25,0.36],s:[0.165,0.235],f:[0,0.15]}
                      : {p:[0.42,1],v:[0.30,0.405],i:[0.145,0.275],s:[0,0.12],f:null};
+  const VBS = VBP ? ckVbpShapes(VBP,D.p) : null;      // 只算一次
   const lay={
     paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
     font:{color:CPAL.mut,size:10}, showlegend:false, barmode:'overlay', bargap:0.15,
@@ -2491,7 +2542,7 @@ function ckRender(J){
     hovermode:'closest', spikedistance:-1, hoverdistance:12,
     hoverlabel:{bgcolor:'#12141a',bordercolor:CPAL.grid,font:{size:11,color:'#e6e9ef'}},
     xaxis:{type:'category',...axc,rangeslider:{visible:false},anchor:CKS.pool?'y10':'y9',
-           showspikes:false,
+           showspikes:false,domain:[0,XW],
            tickmode:'array',tickvals:tickV,ticktext:tickT,
            range:[-0.5,Rw.length-0.5]},                    // 見 G.4-1:一律顯式範圍,不用 autorange
     yaxis :{...axc,domain:D.p,side:'right',tickformat:',.5~f',showspikes:false,
@@ -2499,13 +2550,16 @@ function ckRender(J){
     yaxis7:{...axc,domain:D.v,side:'right',tickformat:'~s',range:VR['yaxis7.range']},
     yaxis8:{...axc,domain:D.i,side:'right',range:[0,104],tickvals:[0,50,80,100]},
     yaxis9:{...axc,domain:D.s,side:'right',range:[-110,110],tickvals:[-100,-33,33,100]},
-    shapes:xshp.concat([{type:'rect',xref:'paper',x0:0,x1:1,yref:'y8',y0:90,y1:104,
+    shapes:(VBS||[]).concat(xshp).concat([{type:'rect',xref:'paper',x0:0,x1:1,yref:'y8',y0:90,y1:104,
              fillcolor:'rgba(248,113,113,.10)',line:{width:0},layer:'below'},
             {type:'line',xref:'paper',x0:0,x1:1,yref:'y8',y0:80,y1:80,
              line:{color:'rgba(248,113,113,.4)',width:1}},
             {type:'line',xref:'paper',x0:0,x1:1,yref:'y9',y0:0,y1:0,
              line:{color:'rgba(226,232,240,.18)',width:1}}]),
     annotations:ann.concat(xann).concat([
+      ...((VBS&&VBS._poc!=null)?[{xref:'paper',x:VBG.x0+VBG.w,xanchor:'right',yref:'y',
+         y:VBS._poc,yanchor:'bottom',showarrow:false,text:'POC '+VBS._poc.toFixed(2),
+         font:{size:8.5,color:CPAL.volHot},bgcolor:CPAL.bgc}]:[]),
       {xref:'paper',yref:'paper',x:0,y:1.002,xanchor:'left',yanchor:'bottom',showarrow:false,
        text:'① 還原K'+(CKS.ma?' + 季/半年/年線 + 動能60D':'')+(CKS.td?' + TD9':'')
             +(idxRel!=null?('   加權指數:本股'+(idxRel>=0?'強於':'弱於')+'指數 '+Math.abs(idxRel).toFixed(1)+'%'
@@ -2819,7 +2873,7 @@ const CK_NOTE = '<b>⓪駕駛艙</b>。開啟「🖱 滾輪縮放/拖曳」後�
  +'<b>買賣燈號(▲▼)已回測,結果是「不上線」</b>——'+'2013–2023 定門檻、2024–2026 樣本外驗證,並與「隨機抽同樣天數」的基準對照:'+'<b>抄底訊號</b>樣本內每次領先隨機基準 +1.04%,但<b>樣本外掉到 +0.27%(p=0.12,不顯著)</b>,是過度配適;'+'<b>減碼訊號</b>更直接——它的超額報酬在樣本內外<b>都是正的</b>,也就是說「高檔位+高RVPOS+爆量」在台股是'+'<b>動能延續</b>的特徵、不是反轉。台股單次來回交易成本約 0.585%,兩者都撐不過。'+'詳見 repo 的 <code>BACKTEST.md</code>。'
  +'<b>①K線</b>用<b>還原價</b>(自建除權息/減資/分割因子,錨定今天=1.0),故均線與 TD9 在除權息日不會出現假跳空;'
  +'副標顯示的收盤是<b>未還原</b>原值,對得上看盤軟體。橘色▲=除權息/減資/分割日。'
- +'<b>均線</b>採台股慣例季線60/半年線120/年線240 標準 SMA(非美股板的 CTA 觸發價口徑),虛線=60 日前收盤(動能基準)。'
+ +'<b>VbP 量價分佈</b>在主圖右側,柱底靠右、向左長(朝向 K 線),綠=該價位收紅K的量、紅=收黑K的量,'+'琥珀框=<b>POC</b>(區間內成交最集中的價位,最厚的套牢/支撐)。此圖只用<b>收盤</b>落箱,'+'下方「③成本分佈」則把每根的量攤到當日最高–最低,所以兩者的 POC 可能略有差異——這是兩種標準演算法,不是錯。'+'<b>均線</b>採台股慣例季線60/半年線120/年線240 標準 SMA(非美股板的 CTA 觸發價口徑),虛線=60 日前收盤(動能基準)。'
  +'<b>TD9</b>橘=賣方九轉、青=買方九轉(收盤 vs 4 根前收盤,不封頂);只顯示「最終數到 9」或「仍在進行中」的段。'
  +'<b>②量</b>暗柱=總成交量、亮柱=主序列(可切換總量/扣當沖後真實換手),琥珀=量比 ≥1.75×60 日均。'
  +'台股當沖佔量中位數約 21%、極端可到 80%(2021 航運),用總量看爆量會被投機量污染。'
