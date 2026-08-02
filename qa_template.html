@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>twflow Phase 1 驗收 — 籌碼長史 + 除權息還原</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.7.0/plotly.min.js"></script>
+<style>
+:root{color-scheme:dark;
+ --page:#0d0d0d;--surface:#1a1a19;--chip:#222220;--grid:#2c2c2a;
+ --ink:#fff;--ink2:#c3c2b7;--muted:#898781;--border:rgba(255,255,255,.10);
+ --up:#4ade4a;--down:#ff6b6b;--blue:#3987e5;--amber:#fab219;--purple:#c084fc;}
+*{box-sizing:border-box}html,body{margin:0;padding:0}
+body{background:var(--page);color:var(--ink);font-family:system-ui,-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;font-size:14px;line-height:1.6}
+.wrap{max-width:1280px;margin:0 auto;padding:18px 18px 70px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--grid)}
+h3{font-size:14px;margin:16px 0 6px;color:var(--ink2)}
+.meta{color:var(--muted);font-size:12px}
+.card{background:var(--surface);border:1px solid var(--grid);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+th,td{padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;white-space:nowrap}
+th:first-child,td:first-child,th.l,td.l{text-align:left}
+th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--surface)}
+.pos{color:var(--up)}.neg{color:var(--down)}.dim{color:var(--muted)}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11.5px;margin-left:6px}
+.ok{background:rgba(74,222,74,.16);color:var(--up)}
+.warn{background:rgba(250,178,25,.18);color:var(--amber)}
+.est{background:rgba(192,132,252,.18);color:var(--purple)}
+.plot{height:400px;margin:6px 0}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.tabs button{padding:5px 13px;border-radius:7px;background:var(--chip);border:1px solid var(--grid);cursor:pointer;font-size:13px;color:var(--ink2)}
+.tabs button.on{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:600}
+pre{background:#111;border:1px solid var(--grid);border-radius:8px;padding:12px;overflow:auto;font-size:11.5px;max-height:460px;color:var(--ink2)}
+ul{margin:6px 0 6px 18px;padding:0}li{margin:3px 0}
+.q{border-left:3px solid var(--amber);padding-left:12px;margin:10px 0;color:var(--ink2)}
+code{background:#111;padding:1px 5px;border-radius:4px;font-size:12px;color:var(--amber)}
+.scroll{max-height:420px;overflow:auto;border:1px solid var(--grid);border-radius:8px}
+@media(max-width:680px){.plot{height:320px}.wrap{padding:12px 10px 50px}}
+</style>
+</head>
+<body><div class="wrap">
+<h1>twflow Phase 1 驗收 — 籌碼長史回填 + 除權息還原</h1>
+<div class="meta" id="hdr"></div>
+
+<h2>1 · 還原前 vs 還原後(收盤價序列)</h2>
+<div class="card">
+  <div class="tabs" id="tabs"></div>
+  <div class="meta" id="sub"></div>
+  <div class="plot" id="p1"></div>
+  <div class="meta">實線=還原後(錨定今天=1.0,含息報酬);虛線=未還原原始收盤;▼標記=除權息/減資日。
+    對數軸,兩線在最右端必定重合(因子錨定今天)。左側岔開的幅度 = 累積配息造成的失真。</div>
+</div>
+
+<h3>事件明細:機械式跳空是否被抵銷</h3>
+<div class="card"><div class="scroll"><table id="evt"></table></div>
+  <div class="meta" style="margin-top:8px">「原始跳空」= 未還原下當日收盤 / 前日收盤 − 1(含配息造成的假跌);
+    「還原後」= (1+原始跳空) ÷ f − 1,f = 參考價/前日收盤。這是真實的當日經濟報酬。</div>
+</div>
+
+<h2>2 · 量還原(配股/分割/減資才需要)</h2>
+<div class="card"><div class="plot" id="p2" style="height:280px"></div>
+  <div class="meta" id="vnote"></div></div>
+
+<h2>3 · chips/&lt;sid&gt;.json 欄位樣本</h2>
+<div class="card"><pre id="sample"></pre></div>
+
+<script>
+const PACK = __PACK__;
+const SAMPLE = __SAMPLE__;
+const SIDS = Object.keys(PACK);
+let cur = SIDS[0];
+
+document.getElementById('sample').textContent = JSON.stringify(SAMPLE, null, 1)
+  .replace(/^\{\n|\n\}$/g,'').replace(/^ /gm,'');
+document.getElementById('hdr').textContent =
+  '資料期間 ' + PACK[SIDS[0]].d[0] + ' ~ ' + PACK[SIDS[0]].d[PACK[SIDS[0]].d.length-1] +
+  ' · 自建除權息/減資/分割還原因子 · 顏色慣例:綠=漲/流入、紅=跌/流出';
+
+const tabs = document.getElementById('tabs');
+SIDS.forEach(s=>{
+  const b=document.createElement('button');
+  b.textContent=s+' '+PACK[s].name; b.onclick=()=>{cur=s;draw();};
+  b.dataset.sid=s; tabs.appendChild(b);
+});
+
+const LAY = {paper_bgcolor:'#1a1a19',plot_bgcolor:'#1a1a19',font:{color:'#c3c2b7',size:11},
+  margin:{l:58,r:58,t:26,b:34},showlegend:true,
+  legend:{orientation:'h',y:1.12,x:0,font:{size:11}},
+  xaxis:{gridcolor:'#2c2c2a',zeroline:false},
+  yaxis:{gridcolor:'#2c2c2a',zeroline:false}};
+
+function draw(){
+  [...tabs.children].forEach(b=>b.classList.toggle('on',b.dataset.sid===cur));
+  const P = PACK[cur];
+  const evx = P.ev.map(e=>e.d), evy = P.ev.map(e=>P.adj[P.d.indexOf(e.d)]);
+
+  Plotly.react('p1',[
+    {x:P.d,y:P.raw,name:'未還原(看盤軟體價)',type:'scatter',mode:'lines',
+     line:{color:'#898781',width:1.4,dash:'dot'},hovertemplate:'%{x}<br>未還原 %{y}<extra></extra>'},
+    {x:P.d,y:P.adj,name:'還原後(計算用)',type:'scatter',mode:'lines',
+     line:{color:'#4ade4a',width:1.8},hovertemplate:'%{x}<br>還原 %{y}<extra></extra>'},
+    {x:evx,y:evy,name:'除權息/減資日',type:'scatter',mode:'markers',
+     marker:{symbol:'triangle-down',size:8,color:'#fab219'},
+     text:P.ev.map(e=>e.k+(e.cash?(' '+e.cash+'元'):'')+' f='+e.f),
+     hovertemplate:'%{x}<br>%{text}<extra></extra>'}
+  ],{...LAY,yaxis:{...LAY.yaxis,type:'log',title:{text:'股價(對數)',font:{size:11}}}},
+   {responsive:true,displayModeBar:false});
+
+  const gap = P.raw.map((v,i)=>+((P.adj[i]/v-1)*100).toFixed(2));
+  document.getElementById('sub').innerHTML =
+    cur+' '+P.name+' · 事件 '+P.ev.length+' 次 · 最早還原因子 '+
+    (P.adj[0]/P.raw[0]).toFixed(6)+' → 期初失真 '+gap[0].toFixed(1)+'%'+
+    (P.vf_used?'<span class="badge warn">有股數變動(配股/減資),量也已還原</span>'
+              :'<span class="badge ok">純配息,股數未變,量不需還原</span>');
+
+  const t=document.getElementById('evt');
+  t.innerHTML='<tr><th class="l">日期</th><th class="l">類型</th><th>配發</th><th>前日收</th>'+
+    '<th>參考價</th><th>因子 f</th><th>原始跳空</th><th>還原後</th><th class="l">備註</th></tr>'+
+    P.ev.map(e=>{
+      const cls=v=>v>=0?'pos':'neg';
+      return '<tr><td class="l">'+e.d+'</td><td class="l">'+e.k+'</td><td>'+(e.cash??'')+
+        '</td><td>'+e.bp+'</td><td>'+e.ap+'</td><td>'+e.f.toFixed(6)+
+        '</td><td class="'+cls(e.raw)+'">'+e.raw.toFixed(2)+'%</td>'+
+        '<td class="'+cls(e.adj)+'"><b>'+e.adj.toFixed(2)+'%</b></td>'+
+        '<td class="l dim">'+(e.note||'')+'</td></tr>';
+    }).join('');
+
+  Plotly.react('p2',[
+    {x:P.d,y:P.vraw,name:'原始成交量(張)',type:'scatter',mode:'lines',line:{color:'#898781',width:1,dash:'dot'}},
+    {x:P.d,y:P.vadj,name:'還原後成交量(張)',type:'scatter',mode:'lines',line:{color:'#3987e5',width:1.3}}
+  ],{...LAY,yaxis:{...LAY.yaxis,title:{text:'張',font:{size:11}}}},{responsive:true,displayModeBar:false});
+  document.getElementById('vnote').textContent = P.vf_used
+    ? '本檔有配股/減資造成的股數變動,歷史成交量已按股數乘數還原(兩線分岔處=股數事件)。'
+    : '本檔期間內只有現金股利,發行股數未變 → 量還原因子恆為 1,兩線完全重合(這是正確的)。';
+}
+draw();
+</script>
+</div></body></html>

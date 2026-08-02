@@ -4,6 +4,7 @@
   python3 deploy_github.py --init   # 首次:clone/建 gh-pages 分支、推 index.html + custom_symbols.json
   python3 deploy_github.py --pull   # 更新前:同步遠端(取得瀏覽器寫入的最新自訂標的)
   python3 deploy_github.py --push   # 建置後:推最新 index.html
+  python3 deploy_github.py --push-chips  # 籌碼分檔:force-push 到 chips 分支(單一 commit,不留歷史)
 需 .env 內含 GITHUB_TOKEN=ghp_xxx(classic,repo 權限);config.json 的 github.user/repo 需已設定。
 Pages 由 gh-pages 分支自動啟用,網址:https://{user}.github.io/{repo}/
 """
@@ -76,6 +77,40 @@ def stage_and_push(msg):
     git("push", "-u", "origin", BRANCH)
     print(f"OK 已推送 {BRANCH};網址:https://{USER}.github.io/{REPO}/")
 
+# ---------------------------------------------------------------- 籌碼分檔(chips 分支)
+# 15 檔 × ~150KB × 每日更新 ≈ 2.2MB/天。放 gh-pages 一年會膨脹到 GB 級,
+# 因此照 intraday 分支的做法:每次都在全新 repo force-push 單一 commit,分支永遠只有一個 commit。
+CHIPS_BRANCH = GH.get("chips_branch") or "chips"
+CHIPS_DIR = os.path.join(BASE, "chips")
+
+def push_chips(msg="chips update"):
+    import tempfile, glob
+    files = sorted(glob.glob(os.path.join(CHIPS_DIR, "*.json")))
+    if not files:
+        raise SystemExit("chips/ 沒有檔案,請先跑 build_chips.py")
+    tok = _token()
+    tmp = tempfile.mkdtemp(prefix="twchips_")
+    try:
+        url = f"https://x-access-token:{tok}@github.com/{USER}/{REPO}.git"
+        env = dict(os.environ, GIT_AUTHOR_NAME="twflow-bot", GIT_AUTHOR_EMAIL="bot@twflow",
+                   GIT_COMMITTER_NAME="twflow-bot", GIT_COMMITTER_EMAIL="bot@twflow")
+        subprocess.run(["git", "init", "-q", "-b", CHIPS_BRANCH, tmp], check=True)
+        for f in files:
+            shutil.copyfile(f, os.path.join(tmp, os.path.basename(f)))
+        subprocess.run(["git", "-C", tmp, "add", "-A"], check=True, env=env)
+        subprocess.run(["git", "-C", tmp, "commit", "-q", "-m", msg], check=True, env=env)
+        r = subprocess.run(["git", "-C", tmp, "push", "-q", "-f", url, CHIPS_BRANCH],
+                           env=env, capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            print("chips push 失敗:", (r.stderr or "")[-400:])
+            return False
+        total = sum(os.path.getsize(f) for f in files)
+        print(f"OK 已 force-push {CHIPS_BRANCH} 分支({len(files)} 檔 / {total//1024} KB);"
+              f"讀取:https://raw.githubusercontent.com/{USER}/{REPO}/{CHIPS_BRANCH}/<sid>.json")
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 def do_init():
     ensure_clone()
     checkout_branch()
@@ -103,5 +138,7 @@ if __name__ == "__main__":
         do_pull()
     elif "--push" in sys.argv:
         do_push()
+    elif "--push-chips" in sys.argv:
+        sys.exit(0 if push_chips() else 1)
     else:
         print(__doc__)

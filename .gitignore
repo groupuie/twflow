@@ -10,3 +10,7 @@ probe_*.py
 backfill_*.py
 chk_*.py
 shot*.py
+chips/
+qa_phase1.html
+qa_adj_*.json
+probe_chip.json

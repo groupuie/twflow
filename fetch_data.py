@@ -135,6 +135,15 @@ CREATE TABLE IF NOT EXISTS fut_inst(date TEXT, fid TEXT, inst TEXT, long_deal RE
 CREATE TABLE IF NOT EXISTS fut_map(code TEXT PRIMARY KEY, stock_id TEXT, name TEXT, unit REAL);
 CREATE TABLE IF NOT EXISTS stockfut_daily(date TEXT, code TEXT, stock_id TEXT, volume REAL, value REAL, close_near REAL, PRIMARY KEY(date,code));
 CREATE TABLE IF NOT EXISTS market_stat(date TEXT, kind TEXT, amount REAL, PRIMARY KEY(date,kind));
+-- ===== 籌碼駕駛艙長史表(chip_history_start 起,與 watch_* 分離,避免拖累既有頁面) =====
+CREATE TABLE IF NOT EXISTS chip_price(date TEXT, stock_id TEXT, open REAL, high REAL, low REAL, close REAL, spread REAL, volume REAL, amount REAL, PRIMARY KEY(date,stock_id));
+CREATE TABLE IF NOT EXISTS chip_inst(date TEXT, stock_id TEXT, foreign_net REAL, fdealer_net REAL, trust_net REAL, dealer_self REAL, dealer_hedge REAL, PRIMARY KEY(date,stock_id));
+CREATE TABLE IF NOT EXISTS chip_margin(date TEXT, stock_id TEXT, margin_bal REAL, margin_buy REAL, margin_sell REAL, short_bal REAL, short_sell REAL, short_cover REAL, offset_ls REAL, PRIMARY KEY(date,stock_id));
+CREATE TABLE IF NOT EXISTS chip_foreign(date TEXT, stock_id TEXT, ratio REAL, shares REAL, issued REAL, remain_ratio REAL, PRIMARY KEY(date,stock_id));
+CREATE TABLE IF NOT EXISTS chip_sbl(date TEXT, stock_id TEXT, sbl_bal REAL, sbl_short REAL, sbl_return REAL, margin_short_bal REAL, PRIMARY KEY(date,stock_id));
+CREATE TABLE IF NOT EXISTS chip_daytrade(date TEXT, stock_id TEXT, dt_volume REAL, dt_buy REAL, dt_sell REAL, PRIMARY KEY(date,stock_id));
+CREATE TABLE IF NOT EXISTS chip_event(date TEXT, stock_id TEXT, kind TEXT, before_price REAL, after_price REAL, cash REAL, note TEXT, PRIMARY KEY(date,stock_id,kind));
+CREATE TABLE IF NOT EXISTS chip_adj(date TEXT, stock_id TEXT, adj_f REAL, vol_f REAL, PRIMARY KEY(date,stock_id));
 """
 
 def db():
@@ -144,7 +153,10 @@ def db():
     for mig in ("ALTER TABLE tdcc ADD COLUMN total_shares REAL",
                 "ALTER TABLE fut_map ADD COLUMN unit REAL",
                 "ALTER TABLE fut_inst ADD COLUMN long_deal_amt REAL",
-                "ALTER TABLE fut_inst ADD COLUMN short_deal_amt REAL"):
+                "ALTER TABLE fut_inst ADD COLUMN short_deal_amt REAL",
+                "ALTER TABLE mkt_daily ADD COLUMN open REAL",
+                "ALTER TABLE mkt_daily ADD COLUMN high REAL",
+                "ALTER TABLE mkt_daily ADD COLUMN low REAL"):
         try:
             conn.execute(mig)
         except sqlite3.OperationalError:
@@ -237,6 +249,194 @@ def fetch_watch_stock(conn, sid, start):
            [(r["date"], sid, r.get("Volume"), r.get("BuyAmount"), r.get("SellAmount")) for r in rows],
            ["date", "stock_id", "dt_volume", "dt_buy", "dt_sell"])
 
+# ================================================================ 籌碼駕駛艙長史(chip_*)
+# 與 watch_* 完全分離:watch_* 供既有自選股總表(D120 視窗),chip_* 供駕駛艙(2019 起長史)。
+CHIP_START = CONFIG.get("chip_history_start", "2019-01-01")
+CHIP_INDEX = "TAIEX"          # 加權指數也存進 chip_price,供超額動能/疊加線使用
+_SPLIT_CACHE = {}             # TaiwanStockSplitPrice 全市場一次抓,per-run 快取
+
+def _chip_resume(conn, table, sid, back_days=7):
+    """增量起點:該表該檔最後一筆日期往回 back_days 天(upsert 冪等,容忍盤後回補)。
+    無資料 → 從 CHIP_START 整段抓。"""
+    r = conn.execute(f"SELECT MAX(date) FROM {table} WHERE stock_id=?", (sid,)).fetchone()
+    if not r or not r[0]:
+        return CHIP_START
+    d = dt.date.fromisoformat(r[0]) - dt.timedelta(days=back_days)
+    return max(CHIP_START, d.isoformat())
+
+def _split_rows():
+    if "rows" not in _SPLIT_CACHE:
+        try:
+            _SPLIT_CACHE["rows"] = fm("TaiwanStockSplitPrice", start_date=CHIP_START)
+        except Exception as e:
+            log(f"  TaiwanStockSplitPrice 取得失敗(分割事件略過): {repr(e)[:80]}")
+            _SPLIT_CACHE["rows"] = []
+    return _SPLIT_CACHE["rows"]
+
+def fetch_chip_history(conn, sid):
+    """單檔長史抓取(增量)。每個 dataset 獨立 try,單一失敗不影響其他;
+    因為逐表 upsert + 逐表 resume,中斷後重跑會從各表最後日期續抓,不會整段重來。"""
+    done, fail = [], []
+
+    def _step(name, table, fn):
+        try:
+            st = _chip_resume(conn, table, sid)
+            n = fn(st)
+            done.append(f"{name}:{n}")
+        except Exception as e:
+            fail.append(f"{name}({repr(e)[:60]})")
+
+    def _price(st):
+        rows = fm("TaiwanStockPrice", data_id=sid, start_date=st)
+        return upsert(conn, "chip_price",
+                      [(r["date"], sid, r.get("open"), r.get("max"), r.get("min"), r.get("close"),
+                        r.get("spread"), r.get("Trading_Volume"), r.get("Trading_money")) for r in rows],
+                      ["date", "stock_id", "open", "high", "low", "close", "spread", "volume", "amount"])
+
+    def _inst(st):
+        rows = fm("TaiwanStockInstitutionalInvestorsBuySell", data_id=sid, start_date=st)
+        per = {}
+        for r in rows:
+            d = per.setdefault(r["date"], {"f": 0.0, "fd": 0.0, "t": 0.0, "ds": 0.0, "dh": 0.0})
+            net = (r.get("buy") or 0) - (r.get("sell") or 0)
+            n = r.get("name")
+            if n == "Foreign_Investor":      d["f"] += net
+            elif n == "Foreign_Dealer_Self": d["fd"] += net
+            elif n == "Investment_Trust":    d["t"] += net
+            elif n == "Dealer_self":         d["ds"] += net
+            elif n == "Dealer_Hedging":      d["dh"] += net
+        return upsert(conn, "chip_inst",
+                      [(k, sid, v["f"], v["fd"], v["t"], v["ds"], v["dh"]) for k, v in per.items()],
+                      ["date", "stock_id", "foreign_net", "fdealer_net", "trust_net", "dealer_self", "dealer_hedge"])
+
+    def _margin(st):
+        rows = fm("TaiwanStockMarginPurchaseShortSale", data_id=sid, start_date=st)
+        return upsert(conn, "chip_margin",
+                      [(r["date"], sid, r.get("MarginPurchaseTodayBalance"), r.get("MarginPurchaseBuy"),
+                        r.get("MarginPurchaseSell"), r.get("ShortSaleTodayBalance"), r.get("ShortSaleSell"),
+                        r.get("ShortSaleBuy"), r.get("OffsetLoanAndShort")) for r in rows],
+                      ["date", "stock_id", "margin_bal", "margin_buy", "margin_sell",
+                       "short_bal", "short_sell", "short_cover", "offset_ls"])
+
+    def _foreign(st):
+        rows = fm("TaiwanStockShareholding", data_id=sid, start_date=st)
+        return upsert(conn, "chip_foreign",
+                      [(r["date"], sid, r.get("ForeignInvestmentSharesRatio"), r.get("ForeignInvestmentShares"),
+                        r.get("NumberOfSharesIssued"), r.get("ForeignInvestmentRemainRatio")) for r in rows],
+                      ["date", "stock_id", "ratio", "shares", "issued", "remain_ratio"])
+
+    def _sbl(st):
+        rows = fm("TaiwanDailyShortSaleBalances", data_id=sid, start_date=st)
+        return upsert(conn, "chip_sbl",
+                      [(r["date"], sid, r.get("SBLShortSalesCurrentDayBalance"), r.get("SBLShortSalesShortSales"),
+                        r.get("SBLShortSalesReturns"), r.get("MarginShortSalesCurrentDayBalance")) for r in rows],
+                      ["date", "stock_id", "sbl_bal", "sbl_short", "sbl_return", "margin_short_bal"])
+
+    def _daytrade(st):
+        rows = fm("TaiwanStockDayTrading", data_id=sid, start_date=st)
+        return upsert(conn, "chip_daytrade",
+                      [(r["date"], sid, r.get("Volume"), r.get("BuyAmount"), r.get("SellAmount")) for r in rows],
+                      ["date", "stock_id", "dt_volume", "dt_buy", "dt_sell"])
+
+    _step("price", "chip_price", _price)
+    if sid != CHIP_INDEX:
+        _step("inst", "chip_inst", _inst)
+        _step("margin", "chip_margin", _margin)
+        _step("foreign", "chip_foreign", _foreign)
+        _step("sbl", "chip_sbl", _sbl)
+        _step("daytrade", "chip_daytrade", _daytrade)
+        try:
+            done.append(f"event:{fetch_chip_events(conn, sid)}")
+        except Exception as e:
+            fail.append(f"event({repr(e)[:60]})")
+    log(f"  chip {sid}: {' '.join(done)}" + (f"  ⚠失敗 {' '.join(fail)}" if fail else ""))
+    return not fail
+
+def fetch_chip_events(conn, sid):
+    """價格不連續事件:除權息 / 股票分割·面額變更 / 減資。
+    一律存 before_price(事件前最後收盤)與 after_price(參考價),還原因子 f = after/before。"""
+    rows = []
+    for r in fm("TaiwanStockDividendResult", data_id=sid, start_date=CHIP_START):
+        rows.append((r["date"], sid, "div", r.get("before_price"), r.get("after_price"),
+                     r.get("stock_and_cache_dividend"), r.get("stock_or_cache_dividend")))
+    for r in _split_rows():
+        if str(r.get("stock_id")) == sid:
+            rows.append((r["date"], sid, "split", r.get("before_price"), r.get("after_price"), None, r.get("type")))
+    try:
+        for r in fm("TaiwanStockCapitalReductionReferencePrice", data_id=sid, start_date=CHIP_START):
+            rows.append((r["date"], sid, "reduce", r.get("ClosingPriceonTheLastTradingDay"),
+                         r.get("PostReductionReferencePrice"), None, r.get("ReasonforCapitalReduction")))
+    except Exception as e:
+        log(f"    {sid} 減資查詢失敗(忽略): {repr(e)[:60]}")
+    return upsert(conn, "chip_event", rows,
+                  ["date", "stock_id", "kind", "before_price", "after_price", "cash", "note"])
+
+# --- 還原因子 -----------------------------------------------------------------
+# 價格因子 adj_f(d) = Π 所有事件 e>d 的 (after/before);錨定在「今天」,最新一根 = 1.0
+#   → 顯示用未還原收盤(對得上看盤軟體),計算用還原價(均線/TD9/RVPOS/成本分佈)
+# 量因子 vol_f(d) = Π 所有事件 e>d 的股數乘數 sm(配股/分割/減資才 ≠1,純配息 =1)
+#   sm 優先用官方發行股數(NumberOfSharesIssued)實測跳變;無法實測才退回解析式,並標 est
+_SM_EPS = 0.005          # 發行股數變動 <0.5% 視為員工配股等雜訊,不算股數事件
+
+def _share_mult(conn, sid, ex_date):
+    """用官方發行股數實測事件前後的股數乘數;抓不到回 None"""
+    lo = (dt.date.fromisoformat(ex_date) - dt.timedelta(days=10)).isoformat()
+    hi = (dt.date.fromisoformat(ex_date) + dt.timedelta(days=60)).isoformat()
+    a = conn.execute("SELECT issued FROM chip_foreign WHERE stock_id=? AND date<=? AND issued>0 "
+                     "ORDER BY date DESC LIMIT 1", (sid, lo)).fetchone()
+    b = conn.execute("SELECT issued FROM chip_foreign WHERE stock_id=? AND date<=? AND date>? AND issued>0 "
+                     "ORDER BY date DESC LIMIT 1", (sid, hi, lo)).fetchone()
+    if not a or not b or not a[0] or not b[0]:
+        return None
+    m = b[0] / a[0]
+    return m if abs(m - 1.0) >= _SM_EPS else 1.0
+
+def rebuild_chip_adj(conn, sid):
+    """重算整條還原因子序列(新事件會改變所有歷史因子,故每次全量重算;1850 列 × 15 檔極快)"""
+    dates = [r[0] for r in conn.execute("SELECT date FROM chip_price WHERE stock_id=? ORDER BY date", (sid,))]
+    if not dates:
+        return 0
+    ev = {}
+    for d, kind, bp, ap, note in conn.execute(
+            "SELECT date,kind,before_price,after_price,note FROM chip_event WHERE stock_id=? ORDER BY date", (sid,)):
+        if not bp or not ap or bp <= 0 or ap <= 0:
+            continue
+        pf = ap / bp
+        sm = _share_mult(conn, sid, d)
+        est = sm is None
+        if est:                                   # 退回解析式
+            sm = (bp / ap) if kind in ("split", "reduce") else 1.0
+        e = ev.setdefault(d, {"pf": 1.0, "sm": 1.0, "est": False, "kinds": []})
+        e["pf"] *= pf; e["sm"] *= sm; e["est"] = e["est"] or est; e["kinds"].append(kind)
+    f = vf = 1.0
+    out = []
+    for d in reversed(dates):
+        out.append((d, sid, round(f, 10), round(vf, 10)))
+        if d in ev:
+            f *= ev[d]["pf"]; vf *= ev[d]["sm"]
+    upsert(conn, "chip_adj", out, ["date", "stock_id", "adj_f", "vol_f"])
+    big = [(d, round(v["sm"], 4)) for d, v in sorted(ev.items()) if abs(v["sm"] - 1) >= _SM_EPS]
+    if big:
+        log(f"    {sid} 股數事件(量需還原): {big}")
+    return len(out)
+
+def chip_history_all(conn, sids=None):
+    sids = sids or (list(CONFIG["watchlist"]) + [CHIP_INDEX])
+    ok = 0
+    for i, sid in enumerate(sids, 1):
+        try:
+            if fetch_chip_history(conn, sid):
+                ok += 1
+            if sid != CHIP_INDEX:
+                rebuild_chip_adj(conn, sid)
+        except Exception as e:
+            log(f"  chip {sid} 整檔失敗(續下一檔): {repr(e)[:90]}")
+        if i % 5 == 0:
+            conn.commit()
+    conn.commit()
+    log(f"籌碼長史({CHIP_START} 起): {ok}/{len(sids)} 檔完成")
+    return ok
+
 # ---------------------------------------------------------------- TWSE 全市場快照
 def twse_url(path, **q):
     q.setdefault("response", "json")
@@ -259,7 +459,8 @@ def fetch_twse_day(date):
         diff = num(row[10])
         out[sid] = {"name": row[1].strip(), "close": num(row[8]),
                     "chg": (sign * diff) if diff is not None else None,
-                    "volume": num(row[2]), "amount": num(row[4])}
+                    "volume": num(row[2]), "amount": num(row[4]),
+                    "open": num(row[5]), "high": num(row[6]), "low": num(row[7])}   # 全市場型態掃描用(Phase 4)
 
     j = http_json(twse_url("fund/T86", date=d8, selectType="ALLBUT0999"), gap=1.0)
     if j.get("stat") == "OK":
@@ -324,7 +525,8 @@ def fetch_tpex_day(date):
         if not SID_RE.fullmatch(sid):
             continue
         out[sid] = {"name": str(row[1]).strip(), "close": num(row[2]), "chg": num2_signed(row[3]),
-                    "volume": num(row[7]), "amount": num(row[8])}
+                    "volume": num(row[7]), "amount": num(row[8]),
+                    "open": num(row[4]), "high": num(row[5]), "low": num(row[6])}   # 欄序:收/漲跌/開/高/低/量/額
 
     j = http_json(tpex_url("3insti/daily_trade/3itrade_hedge_result.php", l="zh-tw", se="EW", t="D", d=roc(date), o="json"), gap=1.0)
     tbl = (j.get("tables") or [{}])[0]
@@ -361,7 +563,8 @@ def num2_signed(s):
 # ---------------------------------------------------------------- snapshot 組裝
 MKT_COLS = ["date", "stock_id", "market", "name", "close", "chg", "volume", "amount",
             "foreign_net", "trust_net", "dealer_net", "total_net",
-            "margin_bal", "margin_prev", "short_bal", "short_prev"]
+            "margin_bal", "margin_prev", "short_bal", "short_prev",
+            "open", "high", "low"]
 
 def store_snapshot(conn, date, twse_out, tpex_out, margin_total_rows, inst_total_rows):
     rows = []
@@ -374,7 +577,8 @@ def store_snapshot(conn, date, twse_out, tpex_out, margin_total_rows, inst_total
             rows.append((date, sid, market, r.get("name"), r.get("close"), r.get("chg"),
                          r.get("volume"), r.get("amount"),
                          r.get("foreign_net"), r.get("trust_net"), r.get("dealer_net"), r.get("total_net"),
-                         r.get("margin_bal"), r.get("margin_prev"), r.get("short_bal"), r.get("short_prev")))
+                         r.get("margin_bal"), r.get("margin_prev"), r.get("short_bal"), r.get("short_prev"),
+                         r.get("open"), r.get("high"), r.get("low")))
     n = upsert(conn, "mkt_daily", rows, MKT_COLS)
     # TWSE 官方即時 fallback(補足 FinMind 可能的延遲)
     if margin_total_rows:
@@ -742,6 +946,7 @@ def do_backfill():
     miss = missing_snapshot_days(conn, snap_days)
     log(f"全市場快照需回補 {len(miss)} 個交易日: {miss[0] if miss else '-'} ~ {miss[-1] if miss else '-'}")
     snapshot_days(conn, miss)
+    chip_history_all(conn)          # 籌碼駕駛艙長史(2019 起,首次約 15 檔×7 dataset ≈ 110 calls)
     fetch_tdcc(conn)
     fetch_fx(conn, start)
     fetch_futures(conn, start)
@@ -821,6 +1026,10 @@ def do_update():
             fetch_watch_stock(conn, sid, lookback)
         log("自選股增量完成")
         try:
+            chip_history_all(conn)      # 籌碼長史增量(每檔每表只抓 MAX(date)-7 之後)
+        except Exception as e:
+            log(f"籌碼長史更新異常(不影響其他): {e}")
+        try:
             fetch_ticks_bigsmall(conn)
         except Exception as e:
             log(f"大小單分解異常(不影響其他): {e}")
@@ -893,8 +1102,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", action="store_true")
     ap.add_argument("--update", action="store_true")
+    ap.add_argument("--chips", action="store_true", help="只跑籌碼駕駛艙長史(chip_*)")
+    ap.add_argument("--sid", help="--chips 限定單檔,例:--chips --sid 2330")
     a = ap.parse_args()
-    if a.backfill:
+    if a.chips:
+        c = db()
+        chip_history_all(c, [a.sid] if a.sid else None)
+    elif a.backfill:
         do_backfill()
     elif a.update:
         do_update()

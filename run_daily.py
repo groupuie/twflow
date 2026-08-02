@@ -51,6 +51,35 @@ for line in b.stdout.splitlines():
     if line.startswith("DATAFP "):
         fp = line.split(None, 1)[1].strip()
 
+# 2b) 籌碼駕駛艙分檔(chips/<sid>.json)—— 獨立指紋、獨立分支,與 index.html 解耦。
+#     即使 index.html 沒變(DATAFP 相同),籌碼長史有新資料仍要推;反之亦然。
+def _meta_get(k):
+    try:
+        c = sqlite3.connect(DB); v = c.execute("SELECT value FROM meta WHERE key=?", (k,)).fetchone(); c.close()
+        return v[0] if v else None
+    except Exception:
+        return None
+
+def _meta_set(k, v):
+    try:
+        c = sqlite3.connect(DB); c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (k, v)); c.commit(); c.close()
+    except Exception:
+        pass
+
+cfp = None
+cb = run("build_chips.py", timeout=900)
+for line in cb.stdout.splitlines():
+    if line.startswith("CHIPSFP "):
+        cfp = line.split(None, 1)[1].strip()
+summary["chips_built"] = (cb.returncode == 0)
+if HAS_GH and cb.returncode == 0 and cfp and cfp != _meta_get("chips_fp"):
+    ch = run("deploy_github.py", "--push-chips", timeout=900)
+    summary["chips_push"] = (ch.returncode == 0)
+    if ch.returncode == 0:
+        _meta_set("chips_fp", cfp)
+elif cfp:
+    summary["chips_skipped"] = "no_new_data"
+
 # 3) 讀上次已部署的指紋(存在 DB meta,經 Actions 快取跨次保存)
 prev_fp = None
 try:
