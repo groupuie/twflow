@@ -375,7 +375,7 @@ footer{margin-top:26px;color:var(--muted);font-size:12px;line-height:1.7}
       <div class="note" id="cknote"></div>
     </div>
     <div class="card" id="cfCard">
-      <h3>② 籌碼池累積 <span class="small" id="cfSub"></span></h3>
+      <h3>② 現金池累積 <span class="small" id="cfSub"></span></h3>
       <div class="ckbar" id="cfBar"></div>
       <div id="chipflow"><div class="ckmsg">載入中…</div></div>
       <div class="note" id="cfnote"></div>
@@ -1663,7 +1663,7 @@ const CKS = {sym:null,
              zoom:false,     // 滾輪縮放/拖曳模式
              ma:true, td:true, ev:true, vol:'net', ind:'rv',
              idx:false,      // 主圖疊加加權指數(形狀對照)
-             pool:true,      // ⑤ 籌碼池累積軌
+             pool:true,      // ⑤ 現金池累積軌
              tl:false,       // 趨勢線 / 通道
              fib:false,      // Fibonacci 回撤
              pat:false,      // 古典型態
@@ -1673,8 +1673,11 @@ const CKS = {sym:null,
 const CK_DEF = {win:120, off:0};                  // 復原用
 const CK_ZSTEP = 1.14;                            // 每格滾輪的縮放倍率(連續)
 const CK_WMIN = 10;                               // 最小視窗(天)
-const CPOOL={f:'#3987e5',t:'#c98500',d:'#9085e9',m:'#22d3ee',s:'#f472b6',
-             inst:'#fab219',cred:'#c2703e',all:'#e6e9ef',resid:'#a3e635',
+// 現金池配色比照美股板 CPAL:全單累積線 poolA='#fab219'(琥珀黃)、次線 poolM='#c2703e'
+const CPOOL={f:'#3987e5',t:'#34d399',d:'#9085e9',m:'#22d3ee',s:'#f472b6',
+             all:'#fab219',      // 總現金池(全單)= 美股板的琥珀黃主線
+             inst:'#c2703e',     // 其中官方法人 = 美股板的 poolM
+             cred:'#c2703e', resid:'#e6e9ef',   // 殘差=「看不到的錢」,用中性白虛線
              px:'rgba(226,232,240,.75)',idx:'#2dd4bf'};
 const FLOWDEF=[['tot','總現金池(全單估計)',CPOOL.all],
                ['f','外資',CPOOL.f],['t','投信',CPOOL.t],['d','自營商',CPOOL.d],
@@ -1896,7 +1899,7 @@ const CKSIG={
   TOP:{need:3, rv:80, sc:67, vt:1.75, h:5,
        hit:r=>((r.tds0>=9)+((r.rv!=null&&r.rv>=80))+((r.volrn>=1.75&&!r.lim))+(r.sc>=67))},
 };
-/* 籌碼池 5 軌(億元)——與慢速路徑同定義,抽出來共用 */
+/* 現金池 5 軌(億元)——與慢速路徑同定義,抽出來共用 */
 function ckFlows(J,vf){
   const n=J.n, out=[];
   const cash=(lots,i)=>(lots==null||J.c[i]==null)?null:lots*J.c[i]/1e5;
@@ -2013,7 +2016,7 @@ function ckBuildBars(){
   document.getElementById('ckOptBar').innerHTML =
     '<span class="lb">圖層</span>'+T('ma',CKS.ma,'均線 60/120/240')+T('td',CKS.td,'TD9')+T('ev',CKS.ev,'除權息')
     +T('idx',CKS.idx,'加權指數')+T('tl',CKS.tl,'趨勢線')+T('fib',CKS.fib,'Fibonacci')
-    +T('pat',CKS.pat,'型態')+T('sig',CKS.sig,'燈號(觀察用)')+T('pool',CKS.pool,'⑤籌碼池')
+    +T('pat',CKS.pat,'型態')+T('sig',CKS.sig,'燈號(觀察用)')+T('pool',CKS.pool,'⑤現金池')
     +'<span class="sep"></span><span class="lb">量</span>'
     +`<button class="ck ${CKS.vol==='all'&&!mx?'on':''}" data-ck="vol" data-v="all"${dis}>總量</button>`
     +`<button class="ck ${CKS.vol==='net'&&!mx?'on':''}" data-ck="vol" data-v="net"${dis}>扣當沖</button>`;
@@ -2241,7 +2244,7 @@ function ckRender(J){
     }
   }
 
-  // ⑤ 籌碼池累積:柱=當日 5 軌合計淨流,線=法人累積 / 信用戶累積(自視窗起點累加)
+  // ⑤ 現金池累積:柱=當日 5 軌合計淨流,線=法人累積 / 信用戶累積(自視窗起點累加)
   let poolTxt='';
   if(CKS.pool){
     let at=0, ai=0;
@@ -2257,7 +2260,7 @@ function ckRender(J){
     tr.push({type:'scatter',mode:'lines',x,y:cumI,name:'其中法人',showlegend:false,
       line:{color:CPOOL.inst,width:1.5,dash:'dot'},
       hovertemplate:'其中法人 %{y:.0f} 億<extra></extra>',yaxis:'y10'});
-    poolTxt='⑤ 現金池累積(白=全單估計總現金流,琥珀虛=其中官方法人;柱=當日總淨流,單位 億元)';
+    poolTxt='⑤ 現金池累積(琥珀=全單估計總現金流,褐虛=其中官方法人;柱=當日總淨流,單位 億元)';
   }
 
   /* ---------- 圖形分析層 ---------- */
@@ -2441,7 +2444,7 @@ function ckRenderMax(J,el,MB){
   document.getElementById('cknote').innerHTML = CK_NOTE_MAX;
 }
 
-/* ================= 下三區:② 籌碼池累積 / ① 存量分解 / ③ 成本分佈 ================= */
+/* ================= 下三區:② 現金池累積 / ① 存量分解 / ③ 成本分佈 ================= */
 /* 駕駛艙專用的 layout/axis 基底(名稱加 ck 前綴,避免與既有 pbase() 撞名) */
 const ckpb=()=>({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',
   font:{color:CPAL.mut,size:10},hovermode:'x unified',
@@ -2458,12 +2461,12 @@ function lowMsg(id,txt){ const el=document.getElementById(id);
     el.innerHTML='<div class="ckmsg">'+txt+'</div>'; } }
 
 function ckLower(J){
-  try{ cfRender(J); }catch(e){ lowMsg('chipflow','籌碼池繪製失敗:'+e.message); console.error(e); }
+  try{ cfRender(J); }catch(e){ lowMsg('chipflow','現金池繪製失敗:'+e.message); console.error(e); }
   try{ csRender(J); }catch(e){ lowMsg('chipstock','存量分解失敗:'+e.message); console.error(e); }
   try{ ccRender(J); }catch(e){ lowMsg('chipcost','成本分佈失敗:'+e.message); console.error(e); }
 }
 
-/* ---------- ② 籌碼池累積 ---------- */
+/* ---------- ② 現金池累積 ---------- */
 function cfRender(J){
   const el=document.getElementById('chipflow'), MB=MBq(), Rw=ckWinRows(J), li=Rw.length-1;
   const x=Rw.map(r=>r.d.slice(0,4)+'-'+r.d.slice(4,6)+'-'+r.d.slice(6,8));
