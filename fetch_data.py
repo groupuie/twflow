@@ -416,6 +416,13 @@ def rebuild_chip_adj(conn, sid):
         est = sm is None
         if est:                                   # 退回解析式
             sm = (bp / ap) if kind in ("split", "reduce") else 1.0
+        # 交叉驗證:配股/分割/減資的價格與股數是同一件事的兩面 → pf × sm ≈ 1(純現金股利 sm=1、pf≈1 也成立)。
+        # 兩者對不上代表這個股數跳變另有原因(現金增資、庫藏股註銷、私募…),不是這個價格事件的對價,
+        # 硬套會把成交量還原錯。此時放棄量還原(sm=1)並記錄,寧可不還原也不要還原錯。
+        if abs(sm - 1.0) >= _SM_EPS and abs(pf * sm - 1.0) > 0.15:
+            log(f"    {sid} {d} 股數乘數 {sm:.4f} 與價格因子 {pf:.4f} 不相符"
+                f"(乘積 {pf*sm:.3f} 應≈1)→ 不套用量還原")
+            sm = 1.0
         e = ev.setdefault(d, {"pf": 1.0, "sm": 1.0, "est": False, "kinds": []})
         e["pf"] *= pf; e["sm"] *= sm; e["est"] = e["est"] or est; e["kinds"].append(kind)
     f = vf = 1.0

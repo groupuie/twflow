@@ -164,6 +164,16 @@ def build_one(sid, name):
         "dt": {"v": col(dtr, 0, 1e-3, 1),                          # 當沖量 股 → 張
                "b": col(dtr, 1, 1e-6, 1), "s": col(dtr, 2, 1e-6, 1)},   # 當沖買/賣金額 百萬元
         "ev": ev,
+        # 視窗起點「之前」的累積買賣超(張)。存量分解要推估投信持股時,只有視窗內 900 天會嚴重低估;
+        # 有這個基數才能從 chip_history_start 起算。仍是推估:不含起算日之前的既有部位。
+        "pre": {k: rd(v, 0) for k, v in zip(
+            ("f", "t", "d"),
+            conn.execute(
+                "SELECT SUM(COALESCE(foreign_net,0)+COALESCE(fdealer_net,0))/1000.0,"
+                " SUM(COALESCE(trust_net,0))/1000.0,"
+                " SUM(COALESCE(dealer_self,0)+COALESCE(dealer_hedge,0))/1000.0"
+                " FROM chip_inst WHERE stock_id=? AND date<?", (sid, dates[0])).fetchone())},
+        "pre_from": dates_all[0],
         "idx": {"id": CHIP_INDEX, "c": idx_c},
         "tdcc": tdcc,
         # 口徑沿革(全史基準):官方分類不是全期都有。日線視窗若已全在分列之後,前端不需顯示警語;
