@@ -2137,7 +2137,7 @@ function ckViewDirty(){
     const J=CKD[CKS.sym];
     CKS._fast=false;
     if(J&&typeof J==='object'){ ckRender(J); ckLower(J); }
-  }, 180);
+  }, 140);
 }
 function ckZoomAt(frac, factor){
   const J=CKD[CKS.sym]; if(!J||typeof J!=='object') return;
@@ -2229,9 +2229,10 @@ function ckRender(J){
   //   (a) trace 保持小、(b) rAF 節流、(c) 互動期間不連帶重畫下面兩張圖(那才是原本卡的主因)。
   const sl=ckSlice(R);
   const _FAST=!!CKS._fast;
-  // 互動中降採樣:視窗 >320 根時每根 K 棒寬度已不到 2px,抽樣不影響視覺,
-  // 但可以把 SVG 元素數壓在固定上限 → 大視窗拖曳一樣跟得上手。停手後畫完整資料。
-  const _step=(_FAST && sl.rows.length>320) ? Math.ceil(sl.rows.length/320) : 1;
+  // 互動中降採樣:視窗 >240 根時每根 K 棒已不到 6px,抽樣看不出差別,
+  // 但可把 SVG 元素數壓在固定上限 → 拖到 900 日跟拖 120 日一樣跟手。停手後畫完整資料。
+  // 注意:降採樣只抽稀,**不改變 trace 型別**(型別一變 Plotly.react 會整個重建,實測慢 3 倍且會閃)。
+  const _step=(_FAST && sl.rows.length>240) ? Math.ceil(sl.rows.length/240) : 1;
   const Rw = _step>1 ? sl.rows.filter((_,i)=>i%_step===0 || i===sl.rows.length-1) : sl.rows;
   const V=Rw, li=Rw.length-1, win=sl.rows.length, gi0=0;
   if(!Rw.length){ ckMsg('視窗無資料'); return; }
@@ -2265,14 +2266,13 @@ function ckRender(J){
   }
   const {visS,visB,liveS,liveB}=J._td;
 
-  const FAST=!!CKS._fast;              // 互動中:簡化繪製,停手 180ms 後補完整版本
-  const tr=[ FAST
-    ? {type:'scatter',mode:'lines',x,y:Rw.map(r=>r.c),name:'還原收盤',showlegend:false,
-       line:{color:'rgba(226,232,240,.9)',width:1.2},hoverinfo:'skip',xaxis:'x',yaxis:'y'}
-    : {type:'candlestick',x,open:Rw.map(r=>r.o),high:Rw.map(r=>r.h),low:Rw.map(r=>r.l),close:Rw.map(r=>r.c),
-       increasing:{line:{color:CPAL.up,width:1},fillcolor:CPAL.up},
-       decreasing:{line:{color:CPAL.dn,width:1},fillcolor:CPAL.dn},
-       name:'還原K', showlegend:false, xaxis:'x', yaxis:'y'}];
+  // 互動中只略過「文字/標記層」,K 棒本身不變 —— trace 型別若在互動中改變,
+  // Plotly.react 會整個重建反而更慢,而且畫面會閃。
+  const FAST=!!CKS._fast;
+  const tr=[{type:'candlestick',x,open:Rw.map(r=>r.o),high:Rw.map(r=>r.h),low:Rw.map(r=>r.l),close:Rw.map(r=>r.c),
+      increasing:{line:{color:CPAL.up,width:1},fillcolor:CPAL.up},
+      decreasing:{line:{color:CPAL.dn,width:1},fillcolor:CPAL.dn},
+      name:'還原K', showlegend:false, xaxis:'x', yaxis:'y'}];
 
   if(CKS.ma){
     [['季線60D','m60',CPAL.ma1],['半年線120D','m120',CPAL.ma2],['年線240D','m240',CPAL.ma3],
@@ -2815,7 +2815,7 @@ function ckSubtitle(J,r,win){
   document.getElementById('cknote').innerHTML = CK_NOTE;
 }
 
-const CK_NOTE = '<b>⓪駕駛艙</b>。開啟「🖱 滾輪縮放/拖曳」後可用滾輪<b>連續</b>縮放(10 日一路到全部 900 日,不是跳段),'+'以游標所在那根為錨、拖曳可左右平移,「↺ 復原」回到 120 日;縮放倍率依滾輪力道連續換算,觸控板也跟得上手。'+'<b>手機</b>用<b>雙指</b>縮放(單指維持頁面上下滑動,不會被圖表吃掉)。'+'拖動中會暫時改畫收盤線並降採樣以維持流暢,停手後自動補回完整 K 棒與標記。'+'<b>年線觸線圈</b>=收盤高低區間涵蓋年線240D 的那一根(必須先離開 ≥1.5×ATR 再回測才算,冷卻 10 根);'+'同日若有 TD9/13 會放大並轉為琥珀。<b>趨勢線</b>取最近兩個同型 ZigZag 轉折連線延伸;'+'<b>Fibonacci</b> 以 ZigZag 的最高/最低轉折為端點;<b>型態</b>目前支援雙重頂底與頭肩,'+'門檻已按台股放寬(美股板的 3% 門檻在單日可走 10% 的台股會讓誤判暴增)。'
+const CK_NOTE = '<b>⓪駕駛艙</b>。開啟「🖱 滾輪縮放/拖曳」後可用滾輪<b>連續</b>縮放(10 日一路到全部 900 日,不是跳段),'+'以游標所在那根為錨、拖曳可左右平移,「↺ 復原」回到 120 日;縮放倍率依滾輪力道連續換算,觸控板也跟得上手。'+'<b>手機</b>用<b>雙指</b>縮放(單指維持頁面上下滑動,不會被圖表吃掉)。'+'拖動中 K 棒維持不變,只會暫時省略 TD9 數字與各種標記並在大視窗時抽稀,停手後立刻補回完整標記。'+'<b>年線觸線圈</b>=收盤高低區間涵蓋年線240D 的那一根(必須先離開 ≥1.5×ATR 再回測才算,冷卻 10 根);'+'同日若有 TD9/13 會放大並轉為琥珀。<b>趨勢線</b>取最近兩個同型 ZigZag 轉折連線延伸;'+'<b>Fibonacci</b> 以 ZigZag 的最高/最低轉折為端點;<b>型態</b>目前支援雙重頂底與頭肩,'+'門檻已按台股放寬(美股板的 3% 門檻在單日可走 10% 的台股會讓誤判暴增)。'
  +'<b>買賣燈號(▲▼)已回測,結果是「不上線」</b>——'+'2013–2023 定門檻、2024–2026 樣本外驗證,並與「隨機抽同樣天數」的基準對照:'+'<b>抄底訊號</b>樣本內每次領先隨機基準 +1.04%,但<b>樣本外掉到 +0.27%(p=0.12,不顯著)</b>,是過度配適;'+'<b>減碼訊號</b>更直接——它的超額報酬在樣本內外<b>都是正的</b>,也就是說「高檔位+高RVPOS+爆量」在台股是'+'<b>動能延續</b>的特徵、不是反轉。台股單次來回交易成本約 0.585%,兩者都撐不過。'+'詳見 repo 的 <code>BACKTEST.md</code>。'
  +'<b>①K線</b>用<b>還原價</b>(自建除權息/減資/分割因子,錨定今天=1.0),故均線與 TD9 在除權息日不會出現假跳空;'
  +'副標顯示的收盤是<b>未還原</b>原值,對得上看盤軟體。橘色▲=除權息/減資/分割日。'
