@@ -255,9 +255,21 @@ CHIP_START = CONFIG.get("chip_history_start", "2019-01-01")
 CHIP_INDEX = "TAIEX"          # 加權指數也存進 chip_price,供超額動能/疊加線使用
 _SPLIT_CACHE = {}             # TaiwanStockSplitPrice 全市場一次抓,per-run 快取
 
-def _chip_resume(conn, table, sid, back_days=7):
+# 三大法人分類的官方口徑沿革(實測 2330):
+#   ~2014-12  Foreign_Investor / Investment_Trust / Dealer          ← 自營商未拆自行·避險
+#   2015-01~  Foreign_Investor / Investment_Trust / Dealer_self / Dealer_Hedging
+#   2018-01~  再加 Foreign_Dealer_Self(此前外資自營商已含在 Foreign_Investor 內)
+# 對策:legacy「Dealer」歸入 dealer_self,dealer_hedge 留 None(不是 0),
+#       前端才分得出「當天沒有這個分類」與「當天淨額為零」。
+#       外資合計一律用 f + (fd or 0);自營合計一律用 ds + (dh or 0),跨口徑都成立。
+_INST_KEY = {"Foreign_Investor": "f", "Foreign_Dealer_Self": "fd", "Investment_Trust": "t",
+             "Dealer_self": "ds", "Dealer_Hedging": "dh", "Dealer": "ds"}
+
+def _chip_resume(conn, table, sid, back_days=7, full=False):
     """增量起點:該表該檔最後一筆日期往回 back_days 天(upsert 冪等,容忍盤後回補)。
-    無資料 → 從 CHIP_START 整段抓。"""
+    無資料、或 chip_history_start 被往前調(full=True)→ 從 CHIP_START 整段抓。"""
+    if full:
+        return CHIP_START
     r = conn.execute(f"SELECT MAX(date) FROM {table} WHERE stock_id=?", (sid,)).fetchone()
     if not r or not r[0]:
         return CHIP_START
@@ -273,14 +285,14 @@ def _split_rows():
             _SPLIT_CACHE["rows"] = []
     return _SPLIT_CACHE["rows"]
 
-def fetch_chip_history(conn, sid):
+def fetch_chip_history(conn, sid, full=False):
     """單檔長史抓取(增量)。每個 dataset 獨立 try,單一失敗不影響其他;
     因為逐表 upsert + 逐表 resume,中斷後重跑會從各表最後日期續抓,不會整段重來。"""
     done, fail = [], []
 
     def _step(name, table, fn):
         try:
-            st = _chip_resume(conn, table, sid)
+            st = _chip_resume(conn, table, sid, full=full)
             n = fn(st)
             done.append(f"{name}:{n}")
         except Exception as e:
@@ -297,16 +309,14 @@ def fetch_chip_history(conn, sid):
         rows = fm("TaiwanStockInstitutionalInvestorsBuySell", data_id=sid, start_date=st)
         per = {}
         for r in rows:
-            d = per.setdefault(r["date"], {"f": 0.0, "fd": 0.0, "t": 0.0, "ds": 0.0, "dh": 0.0})
-            net = (r.get("buy") or 0) - (r.get("sell") or 0)
-            n = r.get("name")
-            if n == "Foreign_Investor":      d["f"] += net
-            elif n == "Foreign_Dealer_Self": d["fd"] += net
-            elif n == "Investment_Trust":    d["t"] += net
-            elif n == "Dealer_self":         d["ds"] += net
-            elif n == "Dealer_Hedging":      d["dh"] += net
+            d = per.setdefault(r["date"], {})
+            k = _INST_KEY.get(r.get("name"))
+            if k:
+                d[k] = d.get(k, 0.0) + ((r.get("buy") or 0) - (r.get("sell") or 0))
+        # 缺的類別留 None(不是 0)—— 見 _INST_KEY 的口徑沿革註解
         return upsert(conn, "chip_inst",
-                      [(k, sid, v["f"], v["fd"], v["t"], v["ds"], v["dh"]) for k, v in per.items()],
+                      [(k, sid, v.get("f"), v.get("fd"), v.get("t"), v.get("ds"), v.get("dh"))
+                       for k, v in per.items()],
                       ["date", "stock_id", "foreign_net", "fdealer_net", "trust_net", "dealer_self", "dealer_hedge"])
 
     def _margin(st):
@@ -421,11 +431,18 @@ def rebuild_chip_adj(conn, sid):
     return len(out)
 
 def chip_history_all(conn, sids=None):
+    """全清單長史更新。若 config 的 chip_history_start 被往前調(與 meta.chip_start_done 不符),
+    自動整段重抓一次;全部成功後才記錄新起點,失敗時下次會再試(不會半途認定已完成)。"""
+    full_list = sids is None
     sids = sids or (list(CONFIG["watchlist"]) + [CHIP_INDEX])
+    done_start = (conn.execute("SELECT value FROM meta WHERE key='chip_start_done'").fetchone() or [None])[0]
+    full = done_start != CHIP_START
+    if full and done_start:
+        log(f"chip_history_start 由 {done_start} 調整為 {CHIP_START} → 本次整段重抓")
     ok = 0
     for i, sid in enumerate(sids, 1):
         try:
-            if fetch_chip_history(conn, sid):
+            if fetch_chip_history(conn, sid, full=full):
                 ok += 1
             if sid != CHIP_INDEX:
                 rebuild_chip_adj(conn, sid)
@@ -433,6 +450,8 @@ def chip_history_all(conn, sids=None):
             log(f"  chip {sid} 整檔失敗(續下一檔): {repr(e)[:90]}")
         if i % 5 == 0:
             conn.commit()
+    if full and full_list and ok == len(sids):
+        conn.execute("INSERT OR REPLACE INTO meta VALUES('chip_start_done', ?)", (CHIP_START,))
     conn.commit()
     log(f"籌碼長史({CHIP_START} 起): {ok}/{len(sids)} 檔完成")
     return ok

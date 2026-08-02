@@ -63,6 +63,20 @@ def col(rows, i, scale=1.0, nd=1):
     return [None if r[i] is None else round(r[i] * scale, nd) for r in rows]
 
 
+def _first_non_null(dates, rows, i):
+    for d, r in zip(dates, rows):
+        if r[i] is not None:
+            return d
+    return None
+
+
+def _col_from(table, colname, sid):
+    """該欄位在『全史』的第一個非 NULL 日期。口徑沿革要看全史,不能只看送給瀏覽器的 900 根。"""
+    r = conn.execute(f"SELECT MIN(date) FROM {table} WHERE stock_id=? AND {colname} IS NOT NULL",
+                     (sid,)).fetchone()
+    return r[0] if r and r[0] else None
+
+
 # ---------------------------------------------------------------- 加權指數(全檔共用)
 _idx_rows = conn.execute(
     "SELECT date,open,high,low,close,volume,amount FROM chip_price WHERE stock_id=? ORDER BY date",
@@ -152,6 +166,18 @@ def build_one(sid, name):
         "ev": ev,
         "idx": {"id": CHIP_INDEX, "c": idx_c},
         "tdcc": tdcc,
+        # 口徑沿革(全史基準):官方分類不是全期都有。日線視窗若已全在分列之後,前端不需顯示警語;
+        # 但月K/季節性/Phase 4 回測會吃到早期資料,那裡要標。
+        "caveat": {
+            "fd_from": _col_from("chip_inst", "fdealer_net", sid),   # 外資自營商分列起日(此前併入外資)
+            "dh_from": _col_from("chip_inst", "dealer_hedge", sid),  # 自營避險分列起日(此前為自營商合計)
+            "dt_from": _col_from("chip_daytrade", "dt_volume", sid),  # 現股當沖上路日(2014-01)
+            "daily_window_clean": all(
+                (x is None or x <= dates[0]) for x in
+                (_col_from("chip_inst", "fdealer_net", sid), _col_from("chip_inst", "dealer_hedge", sid),
+                 _col_from("chip_daytrade", "dt_volume", sid))),
+            "note": "外資合計 = f + (fd or 0);自營合計 = ds + (dh or 0)。null = 該日官方無此分類,非 0。",
+        },
     }
     if any(abs(x - 1.0) > 1e-9 for x in vf):
         out["vf"] = runs(vf, 8)
@@ -164,7 +190,7 @@ def main():
     names = {r[0]: r[1] for r in conn.execute("SELECT stock_id,name FROM stock_info")}
     only = sys.argv[1] if len(sys.argv) > 1 else None
     wl = [only] if only else list(CONFIG["watchlist"])
-    index, total = [], 0
+    index, total, fph = [], 0, hashlib.sha1()
     for sid in wl:
         o = build_one(sid, names.get(sid, sid))
         if not o:
@@ -173,6 +199,10 @@ def main():
         p = os.path.join(OUT_DIR, f"{sid}.json")
         open(p, "w", encoding="utf-8").write(s)
         total += len(s)
+        # 指紋雜湊「檔案實際內容」(排除每次都變的 gen 時戳),避免只比日期/根數而漏掉
+        # 口徑修正、回補加深、欄位新增這類內容變動 → 不會該推卻沒推
+        fph.update(json.dumps({k: v for k, v in o.items() if k != "gen"},
+                              ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
         index.append({"sid": sid, "name": o["name"], "n": o["n"],
                       "first": o["first"], "last": o["last"], "kb": round(len(s) / 1024, 1),
                       "ev": len(o["ev"]), "tdcc": len(o["tdcc"])})
@@ -183,8 +213,7 @@ def main():
     if not only:
         open(os.path.join(OUT_DIR, "_index.json"), "w", encoding="utf-8").write(
             json.dumps(meta, ensure_ascii=False, separators=(",", ":")))
-    fp = hashlib.sha1(json.dumps([(i["sid"], i["last"], i["n"]) for i in index]).encode()).hexdigest()[:16]
-    print(f"CHIPSFP {fp}")
+    print(f"CHIPSFP {fph.hexdigest()[:16]}")
     print(f"OK chips/ 共 {len(index)} 檔,{total/1024:.0f} KB(gzip 後約 {total/1024/6:.0f} KB)")
 
 
