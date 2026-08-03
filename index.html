@@ -2054,26 +2054,58 @@ function ckFilter(q){
   const L=CKIDX||[]; q=(q||'').trim().toLowerCase();
   return q ? L.filter(x=>x.sid.toLowerCase().includes(q)||(x.name||'').toLowerCase().includes(q)) : L;
 }
+/* 標的列拆成「外殼建立一次」+「只更新選單」兩段。
+   原本每打一個字就重建整列 innerHTML,中文注音/拼音輸入法的組字狀態會連同 input 元素一起被銷毀,
+   造成手機打不出注音。現在輸入框從頭到尾是同一個 DOM 節點,而且組字期間完全不動它。 */
+function ckSymShell(){
+  const el=document.getElementById('ckSymBar');
+  if(el._built) return;
+  el._built=1;
+  el.innerHTML='<span class="lb">標的</span>'
+    +'<input id="ckSearch" class="sym" style="width:180px" placeholder="搜尋代號或名稱…" '
+    +'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'
+    +'<select id="ckSel" class="win" style="max-width:240px"></select>'
+    +'<span class="small" id="ckCnt"></span>'
+    +'<span id="ckAddWrap"></span>'
+    +'<span class="sep"></span><span id="ckQuick"></span>';
+  const se=el.querySelector('#ckSearch');
+  // IME 組字期間不重繪、不搜尋;組完字(compositionend)才更新選單
+  se.addEventListener('compositionstart',()=>{ se._ime=true; });
+  se.addEventListener('compositionend',()=>{ se._ime=false; ckSyncSel(); });
+  se.addEventListener('input',()=>{ if(!se._ime) ckSyncSel(); });
+  se.addEventListener('keydown',e=>{
+    if(e.key!=='Enter'||se._ime||e.isComposing) return;
+    const h=ckFilter(se.value);
+    if(h.length){ CKS.sym=h[0].sid; CKS.off=0; CKS._winf=null; ckSyncSel(); ckShow(); }
+  });
+  el.querySelector('#ckSel').onchange=e=>{
+    if(e.target.value){ CKS.sym=e.target.value; CKS.off=0; CKS._winf=null; ckSyncSel(); ckShow(); }
+  };
+}
+function ckSyncSel(){
+  const el=document.getElementById('ckSymBar'); if(!el||!el._built) return;
+  const se=el.querySelector('#ckSearch'), sel=el.querySelector('#ckSel');
+  const q=(se.value||'').trim(), hit=ckFilter(q), L=CKIDX||[];
+  // 只換 option,不碰 input,組字狀態才不會被打斷
+  sel.innerHTML = hit.length
+    ? hit.map(x=>`<option value="${x.sid}">${x.sid} ${x.name}</option>`).join('')
+    : '<option value="">查無符合</option>';
+  if(hit.some(x=>x.sid===CKS.sym)) sel.value=CKS.sym;
+  el.querySelector('#ckCnt').textContent=`${hit.length}/${L.length} 檔`;
+  const canAdd=/^\d{4,6}[A-Z]?$/.test(q) && !L.some(x=>x.sid===q);
+  el.querySelector('#ckAddWrap').innerHTML = canAdd
+    ? `<button class="ck" id="ckAdd" data-v="${q}">＋ 加入 ${q}</button>` : '';
+  const add=el.querySelector('#ckAdd');
+  if(add) add.onclick=()=>ckAddSym(add.dataset.v);
+  const wl=DATA.meta.watchlist||[];
+  el.querySelector('#ckQuick').innerHTML = wl.slice(0,6).map(sx=>
+    `<button class="ck ${sx===CKS.sym?'on':''}" data-ck="sym" data-v="${sx}">${sx}</button>`).join('');
+  el.querySelectorAll('#ckQuick .ck').forEach(b=>{
+    b.onclick=()=>{ CKS.sym=b.dataset.v; CKS.off=0; CKS._winf=null; ckSyncSel(); ckShow(); };
+  });
+}
 function ckBuildBars(){
-  const wl = DATA.meta.watchlist||[];
-  const L  = CKIDX||[];
-  const q  = (document.getElementById('ckSearch')||{}).value||'';
-  const hit= ckFilter(q);
-  const inList = L.some(x=>x.sid===CKS.sym);
-  // 搜尋框 + 下拉選單 + 自選股快捷鍵
-  document.getElementById('ckSymBar').innerHTML =
-    '<span class="lb">標的</span>'
-    + `<input id="ckSearch" class="sym" style="width:170px" placeholder="搜尋代號或名稱…" value="${q.replace(/"/g,'&quot;')}">`
-    + `<select id="ckSel" class="win" style="max-width:230px">`
-    +   (hit.length ? hit.map(x=>`<option value="${x.sid}" ${x.sid===CKS.sym?'selected':''}>${x.sid} ${x.name}</option>`).join('')
-                    : '<option value="">查無符合</option>')
-    + `</select>`
-    + `<span class="small">${hit.length}/${L.length} 檔</span>`
-    + (/^\d{4,6}[A-Z]?$/.test(q.trim()) && !L.some(x=>x.sid===q.trim())
-        ? `<button class="ck" id="ckAdd" data-v="${q.trim()}">＋ 加入 ${q.trim()}</button>` : '')
-    + '<span class="sep"></span>'
-    + wl.slice(0,6).map(sx=>`<button class="ck ${sx===CKS.sym?'on':''}" data-ck="sym" data-v="${sx}">${sx}</button>`).join('');
-
+  ckSymShell(); ckSyncSel();
   const mx = CKS.win==='max';
   const dis = mx ? ' disabled style="opacity:.3;cursor:not-allowed"' : '';
   document.getElementById('ckWinBar').innerHTML =
@@ -2104,21 +2136,10 @@ function ckBuildBars(){
     + [['none','無'],['px','股價%'],['idx','加權指數%'],['both','兩者']].map(([v,nm])=>
         `<button class="ck ${CKS.fidx===v?'on':''}" data-cf="fidx" data-v="${v}">${nm}</button>`).join('');
 
-  const sel=document.getElementById('ckSel');
-  if(sel) sel.onchange=()=>{ if(sel.value){ CKS.sym=sel.value; CKS.off=0; ckBuildBars(); ckShow(); } };
-  const se=document.getElementById('ckSearch');
-  if(se){ se.oninput=()=>{ const v=se.value, p=se.selectionStart; ckBuildBars();
-      const n=document.getElementById('ckSearch'); if(n){ n.value=v; n.focus(); n.setSelectionRange(p,p); } };
-    se.onkeydown=e=>{ if(e.key==='Enter'){ const h=ckFilter(se.value);
-      if(h.length){ CKS.sym=h[0].sid; CKS.off=0; ckBuildBars(); ckShow(); } } }; }
-  const add=document.getElementById('ckAdd');
-  if(add) add.onclick=()=>ckAddSym(add.dataset.v);
-
-  document.querySelectorAll('#ckSymBar .ck,#ckWinBar .ck,#ckOptBar .ck').forEach(b=>{
-    b.onclick=()=>{ if(b.disabled||b.id==='ckAdd') return;
+  document.querySelectorAll('#ckWinBar .ck,#ckOptBar .ck').forEach(b=>{
+    b.onclick=()=>{ if(b.disabled) return;
       const k=b.dataset.ck, v=b.dataset.v;
-      if(k==='sym'){ CKS.sym=v; CKS.off=0; CKS._winf=null; }
-      else if(k==='win'){ CKS.win = v==='max'?'max':+v; CKS.off=0; CKS._winf=(v==='max'?null:+v); }
+      if(k==='win'){ CKS.win = v==='max'?'max':+v; CKS.off=0; CKS._winf=(v==='max'?null:+v); }
       else if(k==='reset'){ CKS.win=CK_DEF.win; CKS.off=CK_DEF.off; CKS._winf=CK_DEF.win; }
       else if(k==='vol'){ CKS.vol=v; }
       else { CKS[v]=!CKS[v]; }
@@ -2131,14 +2152,42 @@ function ckBuildBars(){
   });
 }
 
-/* 自訂標的:寫進既有的 CUSTOM 清單(有 gist/repo 設定就同步,否則存瀏覽器)。
-   後端下一輪會把它納入 chips 產出 → 在那之前先誠實說「還沒有資料」。 */
+/* 自訂標的:先存本機、再視情況同步到 GitHub。
+   後端 chip_pool() 會讀 repo 上的 custom_symbols.json,所以有同步才會真的被抓取;
+   沒 token 就只留在這台瀏覽器,並誠實說明「後端不會知道」。 */
+function ckAddStat(html){
+  const w=document.getElementById('ckAddWrap');
+  if(w) w.innerHTML='<span class="small" style="color:var(--ink2)">'+html+'</span>';
+}
+function ckB64(str){                       // btoa 不能吃 UTF-8(中文股名會丟例外)
+  return btoa(String.fromCharCode(...new TextEncoder().encode(str)));
+}
 async function ckAddSym(sid){
+  let local=[]; try{ local=JSON.parse(localStorage.getItem('twflow_ck_add')||'[]'); }catch(e){}
+  if(!local.includes(sid)){ local.push(sid); try{ localStorage.setItem('twflow_ck_add',JSON.stringify(local)); }catch(e){} }
+  let tok=null; try{ tok=localStorage.getItem('gh_token'); }catch(e){}
+  if(!(GH_SYNC&&tok)){
+    ckAddStat(`已記在本機。<b>但後端還不知道 ${sid}</b> —— 籌碼長史要由後端抓,`
+      +`請到「金流總覽」分頁的自訂追蹤設定 GitHub token 後再加一次,下一輪盤後更新就會出現。`);
+    return;
+  }
+  ckAddStat('同步中…');
   try{
-    if(!CUSTOM.some(x=>(x.sid||x)===sid)){ CUSTOM.push({sid, name:sid}); await saveCustom(CUSTOM); }
-    ckMsg(`已把 <b>${sid}</b> 加入自訂追蹤。籌碼長史需要後端抓取,`
-      +`約在下一輪盤後更新(每 30 分)後出現在清單中;屆時重新整理此頁即可選取。`);
-  }catch(e){ ckMsg('加入失敗:'+e.message); }
+    const api=`https://api.github.com/repos/${GH.user}/${GH.repo}/contents/custom_symbols.json`;
+    const hdr={'Authorization':'token '+tok,'Accept':'application/vnd.github+json'};
+    let sha=null, list=[];
+    const g=await fetch(api+'?ref='+(GH.branch||'gh-pages'),{headers:hdr});
+    if(g.ok){ const j=await g.json(); sha=j.sha;
+      try{ list=JSON.parse(decodeURIComponent(escape(atob(j.content.replace(/\n/g,''))))); }catch(e){ list=[]; } }
+    if(!Array.isArray(list)) list=[];
+    if(!list.some(x=>(x&&x.sid?x.sid:x)===sid)) list.push({sid,name:sid});
+    const body={message:'add chip symbol '+sid, content:ckB64(JSON.stringify(list.slice(0,60))),
+                branch:GH.branch||'gh-pages'};
+    if(sha) body.sha=sha;
+    const r=await fetch(api,{method:'PUT',headers:hdr,body:JSON.stringify(body)});
+    if(!r.ok) throw new Error('HTTP '+r.status+(r.status===401?'(token 無效)':r.status===404?'(token 缺 repo 權限)':''));
+    ckAddStat(`✓ <b>${sid}</b> 已同步。後端會在下一輪盤後更新(每 30 分)抓取長史,之後重新整理即可選取。`);
+  }catch(e){ ckAddStat('同步失敗:'+e.message+'(已留在本機)'); }
 }
 
 /* ---------- 主渲染 ---------- */
