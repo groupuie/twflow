@@ -2750,13 +2750,17 @@ function cfRender(J){
 
 /* ---------- ① 存量分解 ---------- */
 function csRender(J){
-  const Rw=ckWinRows(J), r=Rw[Rw.length-1];
-  const issued=(J.fh.is&&J.fh.is.length)?J.fh.is[J.fh.is.length-1][1]:null;   // 千股
+  const Rw=ckWinRows(J);
+  // 盤後資料分批公布:13:30 先有價格,T86 ~16:00、融資券 ~21:00、外資持股 ~22:00。
+  // 「最後一列」在下午時段只有價格、其餘欄是 null → 每個欄位各自往回找最後一個非 null,
+  // 否則每天下午的建置這整區都會顯示「無發行股數資料」。
+  const lastNN=pick=>{ for(let k=Rw.length-1;k>=0;k--){ const v=pick(Rw[k]); if(v!=null) return v; } return null; };
+  let issued=null;
+  if(J.fh.is) for(let k=J.fh.is.length-1;k>=0;k--){ if(J.fh.is[k][1]!=null){ issued=J.fh.is[k][1]; break; } }
   if(!issued){ lowMsg('chipstock','無發行股數資料'); return; }
-  const kLot=k=>k==null?null:k;                        // 張 → 千股(1 張 = 1000 股 = 1 千股)
-  const foreign=r.fhSh;                                 // 千股(官方)
-  const margin=kLot(r.mgLots);                          // 張 = 千股
-  const sbl=kLot(r.sblLots);
+  const foreign=lastNN(r=>r.fhSh);                      // 千股(官方)
+  const margin =lastNN(r=>r.mgLots);                    // 張 = 千股
+  const sbl    =lastNN(r=>r.sblLots);
   // 投信持股推估:chip_history_start 起的投信買賣超累積(含視窗前基數),不含起算日前既有部位
   let acc=(J.pre&&J.pre.t)||0;
   for(let i=0;i<J.n;i++) acc += (J.inst.t[i]||0);

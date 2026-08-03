@@ -17,3 +17,7 @@ probe_chip.json
 bt_verdict.json
 bt_*.log
 dashboard_native.html
+audit_data.py
+sweep.py
+upd_*.log
+pool100.log
