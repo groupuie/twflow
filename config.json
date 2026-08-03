@@ -19,7 +19,7 @@
   "watch_history_start": "2025-07-01",
   "chip_history_start": "2013-01-01",
   "chip_json_days": 900,
-  "chip_update_budget": 40,
+  "chip_update_budget": 30,
   "snapshot_trading_days": 60,
   "flow_history_start": "2025-07-01",
   "scanner": {

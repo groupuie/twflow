@@ -179,7 +179,9 @@ def indicators(sid, dates_all, n_keep):
         out["m60"].append(rd(m60)); out["m120"].append(rd(m120))
         out["m240"].append(rd(m240)); out["mm"].append(rd(C[i - 60]))
         out["tds"].append(tds[i]); out["tdb"].append(tdb[i])
-    out["_from"] = d[lo_i]
+    # 回傳「過濾後」的日期清單:indicators 內部丟掉了 close<=0 的停牌列,
+    # 呼叫端若拿未過濾的 chip_price 日期對齊,ind 序列會比主序列短 → 前端指標尾端整段錯位。
+    out["_dates"] = d[lo_i:]
     return out
 
 
@@ -215,8 +217,8 @@ def build_one(sid, name):
     if not IND:
         print(f"  {sid} 歷史不足 260 根,略過")
         return None
-    # 指標從 max(240, n-JSON_DAYS) 起算,日線視窗必須跟它對齊,否則會錯位
-    dates = dates_all[dates_all.index(IND["_from"]):]
+    # 日線視窗 = indicators 的「過濾後」日期(停牌/無收盤日不進 JSON),兩邊逐格對齊
+    dates = IND.pop("_dates")
     km = monthly(sid)
 
     px = series("chip_price", "open,high,low,close,volume,amount", sid, dates)

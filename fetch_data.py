@@ -452,44 +452,54 @@ def chip_pool():
                  [str(x.get("sid") if isinstance(x, dict) else x) for x in j])
     return [s for s in dict.fromkeys(pool) if SID_RE.fullmatch(str(s))]
 
-def chip_history_all(conn, sids=None, budget=None):
-    """全清單長史更新。若 config 的 chip_history_start 被往前調(與 meta.chip_start_done 不符),
-    自動整段重抓一次;全部成功後才記錄新起點,失敗時下次會再試(不會半途認定已完成)。
+def _chip_upd_table(conn):
+    """rotation/起點追蹤表。無條件建立 —— 之前只在 sids=None 時建,
+    害 `--chips --sid 2330` 在全新 DB 上寫入追蹤列時炸掉、整檔被記成失敗。"""
+    conn.execute("CREATE TABLE IF NOT EXISTS chip_upd(stock_id TEXT PRIMARY KEY, ts TEXT, start TEXT)")
+    try:
+        conn.execute("ALTER TABLE chip_upd ADD COLUMN start TEXT")
+    except sqlite3.OperationalError:
+        pass
 
-    budget:每輪最多更新幾檔(FinMind register 是 600 次/hr,100 檔 × 7 dataset = 700 次會爆表)。
-      自選股每輪必更新,其餘依「最久沒更新」輪流,盤後每 30 分一輪 → 全池約 2 小時內輪完一次。"""
-    full_list = sids is None
+def chip_history_all(conn, sids=None, budget=None):
+    """全清單長史更新。
+
+    起點追蹤是「每檔」的(chip_upd.start),不是全域旗標:
+      該檔記錄的起點 != config.chip_history_start → 這檔整段重抓一次,成功後記新起點。
+      舊版用全域 meta 旗標,和 budget 輪替併用時「全部完成」永遠湊不齊 →
+      每一輪都對 40 檔整段重抓、永不收斂;per-stock 追蹤讓重抓隨輪替自然攤平、抓完即止。
+
+    budget:每輪最多更新幾檔。FinMind register 600 次/hr,每檔 7 個 dataset;
+      預設 30(自選 15 必更 + 15 輪替)→ 210 次/輪 × 每小時 2 輪 = 420 次,留足餘裕。
+      全池 103 檔約 6 輪(3 小時)輪完一次;自選股永遠是最新。"""
+    _chip_upd_table(conn)
     if sids is None:
-        conn.execute("CREATE TABLE IF NOT EXISTS chip_upd(stock_id TEXT PRIMARY KEY, ts TEXT)")
         pool = chip_pool()
         if budget:
             wl = set(CONFIG["watchlist"])
             seen = {r[0]: r[1] for r in conn.execute("SELECT stock_id,ts FROM chip_upd")}
             rest = sorted([s for s in pool if s not in wl], key=lambda s: seen.get(s, ""))
             sids = [s for s in pool if s in wl] + rest[:max(0, budget - len(wl))]
-            full_list = False           # 只更新一部分 → 不可據此標記「起點已完成」
         else:
             sids = pool
         sids = sids + [CHIP_INDEX]
-    done_start = (conn.execute("SELECT value FROM meta WHERE key='chip_start_done'").fetchone() or [None])[0]
-    full = done_start != CHIP_START
-    if full and done_start:
-        log(f"chip_history_start 由 {done_start} 調整為 {CHIP_START} → 本次整段重抓")
+    starts = {r[0]: r[1] for r in conn.execute("SELECT stock_id,start FROM chip_upd")}
     ok = 0
     for i, sid in enumerate(sids, 1):
         try:
+            # 有資料但記錄起點與 config 不符(含從未記錄)→ 該檔整段重抓;全新檔由 resume 自然全抓
+            full = (sid != CHIP_INDEX) and (starts.get(sid) != CHIP_START)
             if fetch_chip_history(conn, sid, full=full):
                 ok += 1
+                if sid != CHIP_INDEX:
+                    conn.execute("INSERT OR REPLACE INTO chip_upd VALUES(?,?,?)",
+                                 (sid, dt.datetime.now(TPE).isoformat(), CHIP_START))
             if sid != CHIP_INDEX:
                 rebuild_chip_adj(conn, sid)
-                conn.execute("INSERT OR REPLACE INTO chip_upd VALUES(?,?)",
-                             (sid, dt.datetime.now(TPE).isoformat()))
         except Exception as e:
             log(f"  chip {sid} 整檔失敗(續下一檔): {repr(e)[:90]}")
         if i % 5 == 0:
             conn.commit()
-    if full and full_list and ok == len(sids):
-        conn.execute("INSERT OR REPLACE INTO meta VALUES('chip_start_done', ?)", (CHIP_START,))
     conn.commit()
     log(f"籌碼長史({CHIP_START} 起): {ok}/{len(sids)} 檔完成")
     return ok
@@ -1083,8 +1093,8 @@ def do_update():
             fetch_watch_stock(conn, sid, lookback)
         log("自選股增量完成")
         try:
-            # 籌碼長史增量:每輪最多 40 檔(自選 15 必更 + 25 輪替),避開 600 次/hr 的限額
-            chip_history_all(conn, budget=int(CONFIG.get("chip_update_budget", 40)))
+            # 籌碼長史增量:每輪最多 30 檔(自選 15 必更 + 15 輪替),420 次/hr,避開 600 次/hr 限額
+            chip_history_all(conn, budget=int(CONFIG.get("chip_update_budget", 30)))
         except Exception as e:
             log(f"籌碼長史更新異常(不影響其他): {e}")
         try:
