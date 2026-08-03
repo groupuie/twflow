@@ -14,7 +14,6 @@ chips/
 qa_phase1.html
 qa_adj_*.json
 probe_chip.json
-bt_pool.json
 bt_verdict.json
 bt_*.log
 dashboard_native.html

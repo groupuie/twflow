@@ -83,6 +83,29 @@ def stage_and_push(msg):
 CHIPS_BRANCH = GH.get("chips_branch") or "chips"
 CHIPS_DIR = os.path.join(BASE, "chips")
 
+def _rebuild_index(d):
+    """_index.json 由「目錄裡實際存在的檔案」重建,而不是由本次建置的清單決定。
+    合併推送後才不會出現「檔案在、但清單沒列出來」的狀況。"""
+    import glob as _g
+    items = []
+    for f in sorted(_g.glob(os.path.join(d, "*.json"))):
+        if os.path.basename(f).startswith("_"):
+            continue
+        try:
+            o = json.load(open(f, encoding="utf-8"))
+        except Exception:
+            continue
+        items.append({"sid": o.get("sid"), "name": o.get("name"), "n": o.get("n"),
+                      "first": o.get("first"), "last": o.get("last"),
+                      "kb": round(os.path.getsize(f) / 1024, 1),
+                      "ev": len(o.get("ev") or []), "gen": o.get("gen")})
+    items.sort(key=lambda x: str(x["sid"]))
+    json.dump({"gen": max([i.get("gen") or "" for i in items] or [""]), "items": items},
+              open(os.path.join(d, "_index.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, separators=(",", ":"))
+    return len(items)
+
+
 def push_chips(msg="chips update"):
     import tempfile, glob
     files = sorted(glob.glob(os.path.join(CHIPS_DIR, "*.json")))
@@ -95,8 +118,18 @@ def push_chips(msg="chips update"):
         env = dict(os.environ, GIT_AUTHOR_NAME="twflow-bot", GIT_AUTHOR_EMAIL="bot@twflow",
                    GIT_COMMITTER_NAME="twflow-bot", GIT_COMMITTER_EMAIL="bot@twflow")
         subprocess.run(["git", "init", "-q", "-b", CHIPS_BRANCH, tmp], check=True)
+        # 先把分支上既有的檔案拉下來當底 —— force-push 是整包覆蓋,若不先合併,
+        # 「手上剛好只有 15 檔」的那一次推送就會把另外 88 檔洗掉(已經發生過一次)。
+        # 這樣不論是沙盒還是 CI 推,誰有的資料都會被保留,較新的覆蓋較舊的。
+        r0 = subprocess.run(["git", "-C", tmp, "fetch", "--depth", "1", url, CHIPS_BRANCH],
+                            capture_output=True, text=True, timeout=600, env=env)
+        if r0.returncode == 0:
+            subprocess.run(["git", "-C", tmp, "checkout", "-q", "FETCH_HEAD", "--", "."],
+                           capture_output=True, text=True, env=env)
+            subprocess.run(["git", "-C", tmp, "reset", "-q"], capture_output=True, text=True, env=env)
         for f in files:
             shutil.copyfile(f, os.path.join(tmp, os.path.basename(f)))
+        _rebuild_index(tmp)
         subprocess.run(["git", "-C", tmp, "add", "-A"], check=True, env=env)
         subprocess.run(["git", "-C", tmp, "commit", "-q", "-m", msg], check=True, env=env)
         r = subprocess.run(["git", "-C", tmp, "push", "-q", "-f", url, CHIPS_BRANCH],
@@ -104,8 +137,10 @@ def push_chips(msg="chips update"):
         if r.returncode != 0:
             print("chips push 失敗:", (r.stderr or "")[-400:])
             return False
-        total = sum(os.path.getsize(f) for f in files)
-        print(f"OK 已 force-push {CHIPS_BRANCH} 分支({len(files)} 檔 / {total//1024} KB);"
+        import glob as _g
+        allf = [x for x in _g.glob(os.path.join(tmp, "*.json")) if not os.path.basename(x).startswith("_")]
+        total = sum(os.path.getsize(f) for f in allf)
+        print(f"OK 已 force-push {CHIPS_BRANCH} 分支(本次更新 {len(files)} 檔,分支共 {len(allf)} 檔 / {total//1024} KB);"
               f"讀取:https://raw.githubusercontent.com/{USER}/{REPO}/{CHIPS_BRANCH}/<sid>.json")
         return True
     finally:
